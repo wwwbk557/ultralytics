@@ -1,7 +1,7 @@
 # ext/pico_pose — 无框轻量 Pose 头
 
-这是 `PicoPoseNoBox`（PicoDet-S 风格、去掉框回归分支）的**唯一真实实现**。
-上游 `ultralytics/` 里只剩少量带 `# EXT:pico_pose` 的接入点，不再有 shim。
+这是 `PicoPoseNoBox`（纯无框）和 `PicoPoseAuxBox`（训练期辅助框、导出无框）的
+**唯一真实实现**。上游 `ultralytics/` 里只剩少量带 `# EXT:pico_pose` 的接入点，不再有 shim。
 
 > 2026-10 起不再兼容旧权重：`runs/0913poseNoBox.pt` 里 pickle 的是
 > `ultralytics.nn.modules.picopose.PicoPoseNoBox`，shim 删除后无法加载。
@@ -11,9 +11,9 @@
 
 ```text
 ext/pico_pose/
-├─ head.py      # PicoPoseNoBox / PicoDWBlock / PicoSE
-├─ loss.py      # PicoPoseNoBoxLoss + ATSS / VFL / Wing
-├─ cfg/         # 模型结构 yaml（yolo12 / yolo11 两份）
+├─ head.py      # PicoPoseNoBox / PicoPoseAuxBox / PicoDWBlock / PicoSE
+├─ loss.py      # PicoPoseNoBoxLoss(ATSS/Wing) + PicoAuxPoseLoss(复用 v8PoseLoss)
+├─ cfg/         # yolo12 / yolo11 各两份：nobox 与 auxbox
 ├─ train.py     # 训练入口（默认用本目录的 yaml）
 ├─ tests/       # 结构、前向、导出通道的冒烟测试
 └─ README.md
@@ -49,9 +49,36 @@ pip install -e . --no-deps --no-build-isolation
 | --- | --- | --- |
 | `cfg/yolo12-pose-pico-nobox.yaml` | 14 / 17 / 20 | 2,207,175 |
 | `cfg/yolo11-pose-pico-nobox.yaml` | 16 / 19 / 22 | 2,228,967 |
+| `cfg/yolo12-pose-pico-auxbox.yaml` | 14 / 17 / 20 | 2,330,647 |
+| `cfg/yolo11-pose-pico-auxbox.yaml` | 16 / 19 / 22 | 2,352,439 |
 
-两个骨干的 `Pose` 头接口相同，yaml 里只把 `Pose` 换成 `PicoPoseNoBox` 即可；
+两个骨干的 `Pose` 头接口相同，yaml 里只把 `Pose` 换成 `PicoPoseNoBox` / `PicoPoseAuxBox` 即可；
 `PoseModel` / `PoseTrainer` / 损失都不用改。
+
+## 训练期辅助框（推荐）
+
+纯无框训练时，pose 一项占总加权损失的 ~99.8%，cls 只有 ~0.18%，所以 precision/recall
+在前期会抖。`PicoPoseAuxBox` 在训练/验证时额外挂一个**不进入导出图**的框分支：
+
+- 共享 PicoFeat stem → 3×3 Conv → 1×1 Conv(`4*reg_max`)，配 DFL；
+- 训练 `forward` 多返回 `boxes`，`PicoAuxPoseLoss` 直接复用上游 `v8PoseLoss`
+  （TAL + box/DFL + KeypointLoss），只重写 `kpts_decode` 适配 Pico 的
+  `(anchor + raw) * stride` 约定；
+- 验证时也会算 `boxes` 供 validator 的 val loss 使用，但指标仍走 `_inference`
+  的伪框 + 关键点输出；
+- `export=True` 时完全不执行 cv2/dfl。实测 aux 与 no-aux 的 ONNX 输出都是
+  `[1, 9, 6300]`，图里没有 `model.21.cv2*` / `model.21.dfl*` 初始化器。
+
+训练命令：
+
+```bash
+python -m ext.pico_pose.train \
+  model=ext/pico_pose/cfg/yolo12-pose-pico-auxbox.yaml \
+  data=/home/wbk/train_data/0802_1/windmill_4pt_pose.yaml \
+  imgsz=480,640 epochs=300 batch=16 device=0
+```
+
+`PicoPoseNoBox`（纯无框、ATSS/Wing）保留作为 A/B 对照组，不要删。
 
 ## 输出通道契约（部署端必须对齐）
 
@@ -59,7 +86,8 @@ pip install -e . --no-deps --no-build-isolation
 
 | 阶段 | 返回 | 通道数 |
 | --- | --- | --- |
-| 训练 | `dict(scores, kpts, feats)` | `nc` / `nkpt*ndim` |
+| 训练（纯无框） | `dict(scores, kpts, feats)` | `nc` / `nkpt*ndim` |
+| 训练（aux box） | `dict(scores, kpts, boxes, feats)` | 额外 `4*reg_max`，仅 loss 使用 |
 | 验证 | `Tensor`（伪框 + 分数 + 解码关键点） | `4 + nc + nkpt*ndim` |
 | 导出（`export_xy_only=True`，默认） | `Tensor`（分数 sigmoid + 原始 xy） | `nc + 2*nkpt` |
 | 导出（`export_xy_only=False`） | `Tensor`（分数 sigmoid + 解码关键点） | `nc + nkpt*ndim` |
@@ -69,7 +97,7 @@ pip install -e . --no-deps --no-build-isolation
 必须显式设置 `export_xy_only=False`。修改前先更新 `tests/test_smoke.py` 里的
 `test_export_channel_contract`。
 
-`PICO_HEAD_CFG` 支持 `ULTRALYTICS_PICO_HEAD="feat_out=96,use_se=1"` 环境变量；
+`PICO_HEAD_CFG` 支持 `ULTRALYTICS_PICO_HEAD="feat_out=96,use_se=1,aux_box=1"` 环境变量；
 该变量会改变网络结构，训练时请写进实验 README，避免复现时对不上。
 
 ## 运行
@@ -77,19 +105,19 @@ pip install -e . --no-deps --no-build-isolation
 ```bash
 cd /home/wbk/ultralytics
 
-# 方式一：直接用扩展入口（model 默认已指向 yolo12 的 yaml）
+# 方式一：直接用扩展入口（model 默认已指向 yolo12 auxbox 配置）
 python -m ext.pico_pose.train \
   data=/home/wbk/train_data/0802_1/windmill_4pt_pose.yaml \
   imgsz=480,640 epochs=300 batch=16 device=0
 
 # YOLO11-pose 版本：同一个头，换成 11 的骨干/颈部
 python -m ext.pico_pose.train \
-  model=ext/pico_pose/cfg/yolo11-pose-pico-nobox.yaml \
+  model=ext/pico_pose/cfg/yolo11-pose-pico-auxbox.yaml \
   data=/home/wbk/train_data/0802_1/windmill_4pt_pose.yaml \
   imgsz=480,640 epochs=300 batch=16 device=0
 
-# 方式二：仍用 ultralytics CLI，显式给 yaml 路径
-python -m ultralytics yolo pose train \
+# 对照组：纯无框（ATSS + Wing）
+python -m ext.pico_pose.train \
   model=ext/pico_pose/cfg/yolo12-pose-pico-nobox.yaml \
   data=/home/wbk/train_data/0802_1/windmill_4pt_pose.yaml \
   imgsz=480,640 epochs=300 batch=16 device=0

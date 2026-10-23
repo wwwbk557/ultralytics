@@ -17,6 +17,10 @@ TAL 的对齐度量是 ``t = s^alpha * IoU(pred_box, gt)^beta``, 依赖 **预测
 损失槽位与 Ultralytics 的打印保持一致:
 ``[box_loss, pose_loss, kobj_loss, cls_loss, dfl_loss]``, 其中 box / dfl 恒为 0
 —— 训练表格里这两列为 0 就是 "框分支已移除" 的直接证据。
+
+``PicoAuxPoseLoss`` 是另一条路线: 训练时挂一个辅助框分支, 直接复用上游
+``v8PoseLoss``(TAL + box/DFL + KeypointLoss), 只把关键点解码换成 Pico 的
+``(anchor + raw)`` 约定; 导出时框分支不进入计算图。
 """
 
 from __future__ import annotations
@@ -25,10 +29,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ultralytics.utils.loss import v8PoseLoss
 from ultralytics.utils.ops import xywh2xyxy
 from ultralytics.utils.tal import make_anchors
 
-__all__ = ("PicoPoseNoBoxLoss", "atss_assign", "wing_loss", "varifocal_loss", "pairwise_iou")
+__all__ = ("PicoPoseNoBoxLoss", "PicoAuxPoseLoss", "atss_assign", "wing_loss", "varifocal_loss", "pairwise_iou")
 
 
 def pairwise_iou(box_a: torch.Tensor, box_b: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
@@ -250,3 +255,21 @@ class PicoPoseNoBoxLoss:
         loss[3] = loss[3] / bs * self.hyp.cls
         # loss[0](box) 与 loss[4](dfl) 保持 0: 这就是 "去掉框分支" 在损失里的体现
         return loss * bs, loss.detach()
+
+
+class PicoAuxPoseLoss(v8PoseLoss):
+    """Pico 头 + 训练期辅助框的损失：完全复用上游 TAL + box/DFL + KeypointLoss。
+
+    唯一需要适配的是关键点解码约定：Pico 用 ``(anchor + raw) * stride``，
+    而上游 ``Pose`` 用 ``(raw * 2 + anchor - 0.5) * stride``。这里只重写
+    ``kpts_decode``，其余 (TaskAlignedAssigner / BboxLoss / DFL / KeypointLoss)
+    都走官方实现，避免自己维护一套分配逻辑。
+    """
+
+    @staticmethod
+    def kpts_decode(anchor_points: torch.Tensor, pred_kpts: torch.Tensor) -> torch.Tensor:
+        """把 Pico 原始关键点解码到 grid 坐标，供 KeypointLoss 使用。"""
+        y = pred_kpts.clone()
+        y[..., 0] += anchor_points[:, [0]]
+        y[..., 1] += anchor_points[:, [1]]
+        return y

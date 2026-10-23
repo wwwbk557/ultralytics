@@ -10,6 +10,8 @@ torch = pytest.importorskip("torch")
 
 CFG = Path(__file__).resolve().parents[1] / "cfg" / "yolo12-pose-pico-nobox.yaml"
 Y11_CFG = CFG.with_name("yolo11-pose-pico-nobox.yaml")
+AUX_CFG = CFG.with_name("yolo12-pose-pico-auxbox.yaml")
+AUX11_CFG = CFG.with_name("yolo11-pose-pico-auxbox.yaml")
 NC, NKPT, NDIM = 1, 4, 3
 
 
@@ -61,6 +63,66 @@ def test_export_channel_contract():
     finally:
         head.export = False
     assert out.shape == (1, NC + 2 * NKPT, 6300)
+
+
+def test_aux_box_is_train_and_val_only():
+    """aux box 在训练和验证时存在（验证要算 val loss），导出路径不执行 cv2。"""
+    model = _model(AUX_CFG)
+    head = model.model[-1]
+    assert head.aux_box is True
+    assert hasattr(head, "cv2") and hasattr(head, "dfl")
+
+    model.train()
+    out = model(torch.randn(1, 3, 480, 640))
+    assert "boxes" in out
+    assert out["boxes"].shape == (1, 4 * head.reg_max, 6300)
+
+    calls = []
+    handles = [m.register_forward_hook(lambda *_: calls.append(1)) for m in head.cv2]
+    model.eval()
+    with torch.no_grad():
+        _, preds = model(torch.randn(1, 3, 480, 640))
+    assert "boxes" in preds  # validator 的 val loss 需要
+
+    calls.clear()
+    head.export = True
+    try:
+        with torch.no_grad():
+            y = model(torch.randn(1, 3, 480, 640))
+    finally:
+        head.export = False
+        for h in handles:
+            h.remove()
+
+    assert not calls, "导出路径不应执行辅助框分支"
+    assert y.shape == (1, NC + 2 * NKPT, 6300)
+
+
+def test_aux_loss_runs_tal_box_dfl():
+    """aux 模式走官方 v8PoseLoss：box/dfl 槽位应非零。"""
+    from types import SimpleNamespace
+
+    model = _model(AUX_CFG)
+    model.args = SimpleNamespace(box=7.5, cls=0.5, dfl=1.5, pose=12.0, kobj=1.0)
+    model.train()
+    preds = model(torch.randn(1, 3, 480, 640))
+    batch = {
+        "batch_idx": torch.tensor([0, 0]),
+        "cls": torch.tensor([[0.0], [0.0]]),
+        "bboxes": torch.tensor([[0.5, 0.5, 0.2, 0.2], [0.3, 0.3, 0.1, 0.1]]),
+        "keypoints": torch.rand(2, NKPT, NDIM),
+    }
+    loss, items = model.init_criterion()(preds, batch)
+    assert items.shape == (5,)
+    assert torch.isfinite(loss).all()
+    assert float(items[0]) > 0, "box loss 应被激活"
+    assert float(items[4]) > 0, "dfl loss 应被激活"
+
+
+def test_aux_yolo11_config_builds():
+    """aux 头同样可挂 YOLO11 颈部。"""
+    model = _model(AUX11_CFG)
+    assert model.model[-1].aux_box is True
 
 
 def test_checkpoint_uses_ext_module_path(tmp_path):

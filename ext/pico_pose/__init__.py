@@ -11,16 +11,25 @@ __all__ = (
     "PICO_HEAD_CFG",
     "PicoDWBlock",
     "PicoPoseNoBox",
+    "PicoPoseAuxBox",
     "PicoSE",
     "PicoPoseNoBoxLoss",
+    "PicoAuxPoseLoss",
     "atss_assign",
     "pairwise_iou",
     "varifocal_loss",
     "wing_loss",
 )
 
-_HEAD_SYMBOLS = {"PICO_HEAD_CFG", "PicoDWBlock", "PicoPoseNoBox", "PicoSE"}
-_LOSS_SYMBOLS = {"PicoPoseNoBoxLoss", "atss_assign", "pairwise_iou", "varifocal_loss", "wing_loss"}
+_HEAD_SYMBOLS = {"PICO_HEAD_CFG", "PicoDWBlock", "PicoPoseNoBox", "PicoPoseAuxBox", "PicoSE"}
+_LOSS_SYMBOLS = {
+    "PicoPoseNoBoxLoss",
+    "PicoAuxPoseLoss",
+    "atss_assign",
+    "pairwise_iou",
+    "varifocal_loss",
+    "wing_loss",
+}
 
 
 def __getattr__(name: str):

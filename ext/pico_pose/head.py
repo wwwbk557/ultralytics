@@ -28,6 +28,12 @@
 
     ULTRALYTICS_PICO_HEAD="feat_out=96,use_se=1" python -m ultralytics yolo pose train ...
 
+变体
+----
+``PicoPoseAuxBox`` 在训练/验证时额外输出 ``boxes``(DFL 分布)，配合
+``PicoAuxPoseLoss`` 复用上游 ``v8PoseLoss``(TAL + box/DFL + KeypointLoss)；
+``export=True`` 时不执行辅助框分支，ONNX 输出仍只有 cls + kpts。
+
 导入注意
 --------
 不要把 ``import ext.pico_pose.head`` 作为进程里的第一个相关导入: 它需要先导入
@@ -44,11 +50,12 @@ import os
 import torch
 import torch.nn as nn
 
+from ultralytics.nn.modules.block import DFL
 from ultralytics.nn.modules.conv import Conv
 from ultralytics.nn.modules.head import Pose
 from ultralytics.utils.tal import make_anchors
 
-__all__ = ("PicoPoseNoBox", "PicoDWBlock", "PicoSE")
+__all__ = ("PicoPoseNoBox", "PicoPoseAuxBox", "PicoDWBlock", "PicoSE")
 
 
 def _parse_cfg_from_env(cfg: dict) -> dict:
@@ -75,7 +82,7 @@ def _parse_cfg_from_env(cfg: dict) -> dict:
 
 # 默认: 与骨干同尺度(3 级共用的中间通道数), 2 层, 开 SE
 PICO_HEAD_CFG = _parse_cfg_from_env(
-    dict(feat_out=64, num_convs=2, use_se=True, k=5, export_xy_only=True, prior_prob=0.01)
+    dict(feat_out=64, num_convs=2, use_se=True, k=5, export_xy_only=True, prior_prob=0.01, aux_box=False)
 )
 
 
@@ -117,9 +124,10 @@ class PicoPoseNoBox(Pose):
 
     与 ``Pose`` 的区别:
 
-    - 不创建 ``cv2``(框回归)与 ``dfl``(DFL 卷积), 因此没有框分支;
+    - 默认不创建 ``cv2``/``dfl``；``PicoPoseAuxBox`` 子类会加一个仅训练期使用的辅助框分支;
     - 用 PicoFeat 风格的共享深度可分离特征块 + 两个 1x1 输出;
-    - 训练时前向返回 ``{"scores", "kpts", "feats"}``, 交给 ``PicoPoseNoBoxLoss``;
+    - 训练时前向返回 ``{"scores", "kpts", "feats"}``(aux 子类多一个 ``boxes``), 交给
+      ``PicoPoseNoBoxLoss`` / ``PicoAuxPoseLoss``;
     - 验证时用关键点 min/max 合成伪框, 使现有 ``PoseValidator``/NMS 可原样复用;
     - 导出时只输出 ``nc + (2*nkpt | nk)`` 通道, 对齐部署端 C++ 解码。
     """
@@ -137,6 +145,7 @@ class PicoPoseNoBox(Pose):
         k: int | None = None,
         export_xy_only: bool | None = None,
         prior_prob: float | None = None,
+        aux_box: bool | None = None,
     ):
         """构造无框头. ``feat_out`` 等参数缺省时取 ``PICO_HEAD_CFG``."""
         nn.Module.__init__(self)
@@ -147,6 +156,7 @@ class PicoPoseNoBox(Pose):
         self.dw_k = int(cfg["k"] if k is None else k)
         self.export_xy_only = bool(cfg["export_xy_only"] if export_xy_only is None else export_xy_only)
         self.prior_prob = float(cfg["prior_prob"] if prior_prob is None else prior_prob)
+        self.aux_box = bool(cfg["aux_box"] if aux_box is None else aux_box)
 
         self.nc = nc
         self.nl = len(ch)
@@ -172,6 +182,16 @@ class PicoPoseNoBox(Pose):
         self.se = nn.ModuleList(ses)
         self.cls_pred = nn.ModuleList(cls_head)
         self.reg_pred = nn.ModuleList(reg_head)
+        if self.aux_box:
+            # 仅训练时使用的辅助框分支：复用 Detect 的 DFL 输出格式，交给 v8PoseLoss/TAL。
+            self.cv2 = nn.ModuleList(
+                nn.Sequential(
+                    Conv(self.feat_out, self.feat_out, 3),
+                    nn.Conv2d(self.feat_out, 4 * self.reg_max, 1),
+                )
+                for _ in ch
+            )
+            self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
     # ------------------------------------------------------------------ 前向
     def forward(
@@ -179,12 +199,17 @@ class PicoPoseNoBox(Pose):
     ) -> dict[str, torch.Tensor] | torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """训练: ``dict(scores, kpts, feats)``; 验证/导出: 拼接张量."""
         bs = x[0].shape[0]
-        scores, kpts = [], []
+        scores, kpts, boxes = [], [], []
+        aux_active = self.aux_box and (self.training or not self.export)  # 验证需要它算 val loss；导出不要
         for i in range(self.nl):
             f = self.se[i](self.stem[i](x[i]))  # 共享特征(每层只算一次)
             scores.append(self.cls_pred[i](f).view(bs, self.nc, -1))
             kpts.append(self.reg_pred[i](f).view(bs, self.nk, -1))
+            if aux_active:
+                boxes.append(self.cv2[i](f).view(bs, 4 * self.reg_max, -1))
         preds = {"scores": torch.cat(scores, -1), "kpts": torch.cat(kpts, -1), "feats": x}
+        if aux_active:
+            preds["boxes"] = torch.cat(boxes, -1)  # 给 v8PoseLoss 用；export=True 时不生成
         if self.training:
             return preds
         y = self._inference(preds)
@@ -230,13 +255,33 @@ class PicoPoseNoBox(Pose):
         return torch.cat((dbox, x["scores"].sigmoid(), kpts.reshape(bs, self.nk, -1)), 1)
 
     def bias_init(self):
-        """类别头偏置按 ``prior_prob`` 初始化(框头不存在, 无需 2.0 初始化)."""
+        """类别头初始化；aux 模式对齐 Detect 的 stride 相关 bias，避免 nc=1 时 cls loss 偏大."""
         for i, head in enumerate(self.cls_pred):
-            head.bias.data[: self.nc] = math.log(self.prior_prob / (1 - self.prior_prob))
+            if self.aux_box:
+                head.bias.data[: self.nc] = math.log(5 / self.nc / (640 / self.stride[i]) ** 2)
+            else:
+                head.bias.data[: self.nc] = math.log(self.prior_prob / (1 - self.prior_prob))
         for head in self.reg_pred:
             if head.bias is not None:
                 head.bias.data.zero_()
+        if self.aux_box:
+            for head in self.cv2:
+                head[-1].bias.data.fill_(2.0)
 
     def fuse(self) -> None:
         """无框头没有需要融合的 one2many 分支, 保留空实现以兼容 ``BaseModel.fuse``."""
         return
+
+
+class PicoPoseAuxBox(PicoPoseNoBox):
+    """训练期带辅助框分支、验证/导出仍只输出 cls+kpts 的 Pico 头。
+
+    训练时 ``forward`` 额外返回 ``boxes``(4*reg_max 的 DFL 分布)，配合
+    ``PicoAuxPoseLoss``(复用 ``v8PoseLoss``) 使用 TAL + box/DFL + KeypointLoss；
+    ``export=True`` 或 eval 时 ``_inference`` 不会引用框分支，ONNX 图里也没有 cv2/dfl。
+    """
+
+    def __init__(self, *args, **kwargs):
+        """强制打开 aux_box，其余参数与父类一致。"""
+        kwargs["aux_box"] = True
+        super().__init__(*args, **kwargs)
