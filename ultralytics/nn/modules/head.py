@@ -94,7 +94,6 @@ class Detect(nn.Module):
         self.cv2 = nn.ModuleList(
             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
         )
-        # self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.nk, 1)) for x in ch)
         self.cv3 = (
             nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
             if self.legacy
@@ -651,32 +650,6 @@ class Pose(Detect):
             y[:, 0::ndim] = (y[:, 0::ndim] * 2.0 + (self.anchors[0] - 0.5)) * self.strides
             y[:, 1::ndim] = (y[:, 1::ndim] * 2.0 + (self.anchors[1] - 0.5)) * self.strides
             return y
-
-class PoseNoBox(Pose):
-      """与 Pose 完全相同的训练/验证头，仅导出时去掉框回归，输出 nc + nk 通道."""
-
-      def forward_head(self, x, box_head=None, cls_head=None, pose_head=None):
-          if self.export:  # 导出：不调用 cv2/DFL，只算类别和关键点
-              bs = x[0].shape[0]
-              preds = {
-                  "scores": torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], -1),
-                  "feats": x,
-              }
-          else:
-              preds = super().forward_head(x, box_head, cls_head)
-          if pose_head is not None:
-              bs = x[0].shape[0]
-              preds["kpts"] = torch.cat([pose_head[i](x[i]).view(bs, self.nk, -1) for i in range(self.nl)], 2)
-          return preds
-
-      def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
-          if self.export:  # 导出输出：类别 sigmoid + 解码关键点，无 4 通道框
-              shape = x["feats"][0].shape
-              if self.dynamic or self.shape != shape:
-                  self.anchors, self.strides = (a.transpose(0, 1) for a in make_anchors(x["feats"], self.stride, 0.5))
-                  self.shape = shape
-              return torch.cat((x["scores"].sigmoid(), self.kpts_decode(x["kpts"])), 1)
-          return super()._inference(x)
 
 
 class Pose26(Pose):

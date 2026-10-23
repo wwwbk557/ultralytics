@@ -141,7 +141,9 @@ ultralytics = "ultralytics.cfg:entrypoint"
 
 # Tools settings -------------------------------------------------------------------------------------------------------
 [tool.setuptools]  # configuration specific to the `setuptools` build backend.
-packages = { find = { where = ["."], include = ["ultralytics", "ultralytics.*"] } }
+# EXT:pico_pose 让 `pip install -e .` 同时映射仓库根目录的 ext/ 二次开发包，
+# 否则从仓库外 import ultralytics 时，上游 shim 会找不到 ext。
+packages = { find = { where = ["."], include = ["ultralytics", "ultralytics.*", "ext", "ext.*"] } }
 # Tests included below for checking Conda builds in https://github.com/conda-forge/ultralytics-feedstock
 package-data = { "ultralytics" = ["**/*.yaml", "**/*.sh", "../tests/*.py"], "ultralytics.assets" = ["*.jpg"], "ultralytics.solutions.templates" = ["*.html"]}
 

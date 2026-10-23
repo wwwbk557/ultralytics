@@ -1,11 +1,11 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 # yolo12-pose + PicoPoseNoBox: 骨干/颈部与 yolo12-pose 完全一致, 只把头换成
-# "PicoDet-S 风格的轻量无框 Pose 头"(见 ultralytics/nn/modules/picopose.py)。
+# "PicoDet-S 风格的轻量无框 Pose 头"(见 ext/pico_pose/head.py)。
 #
 # 用法(默认 n 尺度, 也可写 model=yolo12s-pose-pico-nobox.yaml 等):
 #   python -m ultralytics yolo pose train \
-#     model=ultralytics/cfg/models/12/yolo12-pose-pico-nobox.yaml \
+#     model=ext/pico_pose/cfg/yolo12-pose-pico-nobox.yaml \
 #     data=/home/wbk/train_data/0802_1/windmill_4pt_pose.yaml \
 #     imgsz=480,640 epochs=300 batch=16 device=0
 #
