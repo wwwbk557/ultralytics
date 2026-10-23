@@ -90,7 +90,11 @@ python -m ext.pico_pose.train \
 | 训练（aux box） | `dict(scores, kpts, boxes, feats)` | 额外 `4*reg_max`，仅 loss 使用 |
 | 验证 | `Tensor`（伪框 + 分数 + 解码关键点） | `4 + nc + nkpt*ndim` |
 | 导出（`export_xy_only=True`，默认） | `Tensor`（分数 sigmoid + 原始 xy） | `nc + 2*nkpt` |
-| 导出（`export_xy_only=False`） | `Tensor`（分数 sigmoid + 解码关键点） | `nc + nkpt*ndim` |
+| 导出（`export_xy_only=False`） | `Tensor`（分数 sigmoid + 原始 xy + 可见性 logits） | `nc + nkpt*ndim` |
+
+注意：导出分支不会解码关键点，也不会对可见性做 sigmoid；C++/部署端需要自己完成
+`(anchor + raw) * stride` 和 `sigmoid(vis)`。这是和旧 `PoseNoBox`（导出解码后的像素坐标）
+最大的契约差异。
 
 ⚠️ 目前 `runs/0913poseNoBox.onnx` 是 `nc=1, kpt_shape=(4,3)` 且默认 `export_xy_only=True`，
 输出为 `[1, 9, 6300]`（1 + 4×2）。如果部署端要的是 `nc + nkpt*3`（例如 3 类 5 点 = 18），
