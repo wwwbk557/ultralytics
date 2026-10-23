@@ -1,7 +1,4 @@
-"""PicoPoseNoBox 的冒烟测试：结构解析、前向、导出通道、旧 checkpoint 兼容。
-
-这些测试刻意写得很小，只锁住“迁移代码位置后不能坏”的契约。
-"""
+"""PicoPoseNoBox 的冒烟测试：结构解析、前向、导出通道、checkpoint 类路径。"""
 
 from __future__ import annotations
 
@@ -12,7 +9,6 @@ import pytest
 torch = pytest.importorskip("torch")
 
 CFG = Path(__file__).resolve().parents[1] / "cfg" / "yolo12-pose-pico-nobox.yaml"
-REPO = CFG.parents[3]
 NC, NKPT, NDIM = 1, 4, 3
 
 
@@ -58,10 +54,14 @@ def test_export_channel_contract():
     assert out.shape == (1, NC + 2 * NKPT, 6300)
 
 
-def test_legacy_checkpoint_loads():
-    """旧 checkpoint 的 pickle 路径应通过上游 shim 解析成功。"""
-    ckpt = REPO / "runs" / "0913poseNoBox.pt"
-    if not ckpt.exists():
-        pytest.skip(f"缺少旧 checkpoint: {ckpt}")
-    ck = torch.load(ckpt, map_location="cpu", weights_only=False)
-    assert type(ck["model"].model[-1]).__name__ == "PicoPoseNoBox"
+def test_checkpoint_uses_ext_module_path(tmp_path):
+    """新 checkpoint 直接引用 ext.pico_pose.head，不再依赖上游 shim。"""
+    from ext.pico_pose import PicoPoseNoBox
+
+    assert PicoPoseNoBox.__module__ == "ext.pico_pose.head"
+
+    head = _model().model[-1]
+    path = tmp_path / "head.pt"
+    torch.save(head, path)
+    loaded = torch.load(path, map_location="cpu", weights_only=False)
+    assert type(loaded).__module__ == "ext.pico_pose.head"

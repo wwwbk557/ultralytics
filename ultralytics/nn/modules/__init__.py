@@ -93,7 +93,6 @@ from .head import (
     YOLOESegment26,
     v10Detect,
 )
-from .picopose import PicoPoseNoBox  # EXT:pico_pose
 from .transformer import (
     AIFI,
     MLP,
@@ -167,7 +166,6 @@ __all__ = (
     "MSDeformAttn",
     "MaxSigmoidAttnBlock",
     "Pose",
-    "PicoPoseNoBox",
     "Pose26",
     "Proto",
     "RTDETRDecoder",

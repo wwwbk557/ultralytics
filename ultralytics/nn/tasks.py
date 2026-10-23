@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 from ultralytics.nn.autobackend import check_class_names
-from ultralytics.nn.modules.picopose import PicoPoseNoBox  # EXT:pico_pose
+from ext.pico_pose.head import PicoPoseNoBox  # EXT:pico_pose
 from ultralytics.nn.modules import (
     AIFI,
     C1,
@@ -617,7 +617,7 @@ class PoseModel(DetectionModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the PoseModel."""
-        from ultralytics.utils.pico_loss import PicoPoseNoBoxLoss  # EXT:pico_pose
+        from ext.pico_pose.loss import PicoPoseNoBoxLoss  # EXT:pico_pose
 
         if isinstance(self.model[-1], PicoPoseNoBox):  # EXT:pico_pose: 无框头走无框损失
             return PicoPoseNoBoxLoss(self)

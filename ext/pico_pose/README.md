@@ -1,7 +1,11 @@
 # ext/pico_pose — 无框轻量 Pose 头
 
 这是 `PicoPoseNoBox`（PicoDet-S 风格、去掉框回归分支）的**唯一真实实现**。
-上游 `ultralytics/` 里只保留 re-export shim 和少量接入点。
+上游 `ultralytics/` 里只剩少量带 `# EXT:pico_pose` 的接入点，不再有 shim。
+
+> 2026-10 起不再兼容旧权重：`runs/0913poseNoBox.pt` 里 pickle 的是
+> `ultralytics.nn.modules.picopose.PicoPoseNoBox`，shim 删除后无法加载。
+> 新权重统一走 `ext.pico_pose.head`，用当前代码重新训练/导出即可。
 
 ## 目录
 
@@ -17,12 +21,9 @@ ext/pico_pose/
 
 ## 上游为什么还留着东西
 
-| 上游位置 | 内容 | 不能搬走的原因 |
+| 上游位置 | 内容 | 为什么还留着 |
 | --- | --- | --- |
-| `ultralytics/nn/modules/picopose.py` | 2 行 re-export | 旧 checkpoint 的 pickle 路径就是 `ultralytics.nn.modules.picopose.PicoPoseNoBox`；`parse_model` 也按模块 globals 解析类名 |
-| `ultralytics/utils/pico_loss.py` | 2 行 re-export | `PoseModel.init_criterion` 运行时从这里导入 |
-| `ultralytics/nn/tasks.py` | 4 处 `# EXT:pico_pose` | `parse_model` 的 head 集合 / `legacy` 赋值 / `init_criterion` 是硬编码的，只能在此接入 |
-| `ultralytics/nn/modules/__init__.py` | 1 行 import | 让 `from ultralytics.nn.modules import PicoPoseNoBox` 继续可用 |
+| `ultralytics/nn/tasks.py` | 4 处 `# EXT:pico_pose` | `parse_model` 按类名从 globals 解析模块，且 head 参数注入 / `legacy` 赋值 / `init_criterion` 是硬编码的，只能在此接入 |
 | `pyproject.toml` | `packages.find.include` 加 `ext*` | 让 `pip install -e .` 同时映射 `ext`，否则在仓库外 `import ultralytics` 会找不到 `ext` |
 
 安装（改了 `ext/` 结构后需要重跑一次）：
@@ -33,11 +34,11 @@ pip install -e . --no-deps --no-build-isolation
 ```
 
 导入时请用 `from ext.pico_pose import PicoPoseNoBox`；不要把
-`import ext.pico_pose.head` 作为进程第一个相关导入（会和上游 shim 循环）。
-
+`import ext.pico_pose.head` 作为进程第一个相关导入（会和 `ultralytics.nn`
+初始化期间的反向导入循环）。
 
 新增自定义头时，**不要**再往 `ultralytics/cfg/models/` 或 `ultralytics/utils/` 里塞文件；
-按同样方式在 `ext/<feature>/` 建目录，上游只留 shim + 带 `# EXT:` 标记的接入行。
+按同样方式在 `ext/<feature>/` 建目录，上游只留带 `# EXT:` 标记的接入行。
 
 ## 输出通道契约（部署端必须对齐）
 
@@ -52,7 +53,8 @@ pip install -e . --no-deps --no-build-isolation
 
 ⚠️ 目前 `runs/0913poseNoBox.onnx` 是 `nc=1, kpt_shape=(4,3)` 且默认 `export_xy_only=True`，
 输出为 `[1, 9, 6300]`（1 + 4×2）。如果部署端要的是 `nc + nkpt*3`（例如 3 类 5 点 = 18），
-必须显式设置 `export_xy_only=False`。修改前先更新 `tests/test_export_contract.py`。
+必须显式设置 `export_xy_only=False`。修改前先更新 `tests/test_smoke.py` 里的
+`test_export_channel_contract`。
 
 `PICO_HEAD_CFG` 支持 `ULTRALYTICS_PICO_HEAD="feat_out=96,use_se=1"` 环境变量；
 该变量会改变网络结构，训练时请写进实验 README，避免复现时对不上。

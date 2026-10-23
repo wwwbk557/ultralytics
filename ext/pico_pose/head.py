@@ -31,9 +31,9 @@
 导入注意
 --------
 不要把 ``import ext.pico_pose.head`` 作为进程里的第一个相关导入: 它需要先导入
-上游的 ``Pose``/``Conv``, 会和 ``ultralytics.nn`` 初始化期间的 shim 形成循环。
-请使用包级导入 ``from ext.pico_pose import PicoPoseNoBox``(会先完成 nn 初始化),
-或者先 ``import ultralytics.nn.tasks``。
+上游的 ``Pose``/``Conv``, 会和 ``ultralytics.nn`` 初始化期间对 ``ext`` 的反向
+导入形成循环。请使用包级导入 ``from ext.pico_pose import PicoPoseNoBox``(会先
+完成 nn 初始化), 或者先 ``import ultralytics.nn.tasks``。
 """
 
 from __future__ import annotations
@@ -240,11 +240,3 @@ class PicoPoseNoBox(Pose):
     def fuse(self) -> None:
         """无框头没有需要融合的 one2many 分支, 保留空实现以兼容 ``BaseModel.fuse``."""
         return
-
-
-# EXT: torch.save 会把类按 __module__ / __qualname__ 写进 checkpoint。把三个自定义类
-# 的模块路径固定到上游 shim，保证代码搬到 ext/ 之后，新旧 checkpoint 都仍能从
-# ultralytics.nn.modules.picopose 解析到同一个类。
-for _cls in (PicoDWBlock, PicoSE, PicoPoseNoBox):
-    _cls.__module__ = "ultralytics.nn.modules.picopose"
-del _cls
