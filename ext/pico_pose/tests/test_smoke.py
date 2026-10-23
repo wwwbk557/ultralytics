@@ -9,14 +9,15 @@ import pytest
 torch = pytest.importorskip("torch")
 
 CFG = Path(__file__).resolve().parents[1] / "cfg" / "yolo12-pose-pico-nobox.yaml"
+Y11_CFG = CFG.with_name("yolo11-pose-pico-nobox.yaml")
 NC, NKPT, NDIM = 1, 4, 3
 
 
-def _model():
+def _model(cfg: Path = CFG):
     """按 4 点单类构建 PoseModel。"""
     from ultralytics.nn.tasks import PoseModel
 
-    return PoseModel(str(CFG), nc=NC, data_kpt_shape=(NKPT, NDIM), verbose=False)
+    return PoseModel(str(cfg), nc=NC, data_kpt_shape=(NKPT, NDIM), verbose=False)
 
 
 def test_head_built_and_forward_shapes():
@@ -31,6 +32,14 @@ def test_head_built_and_forward_shapes():
     assert set(out) == {"scores", "kpts", "feats"}
     assert out["scores"].shape == (1, NC, 6300)
     assert out["kpts"].shape == (1, NKPT * NDIM, 6300)
+
+
+def test_yolo11_config_builds():
+    """同一个头可直接挂到 YOLO11-pose 的 P3/P4/P5 颈部。"""
+    model = _model(Y11_CFG)
+    head = model.model[-1]
+    assert head.__class__.__name__ == "PicoPoseNoBox"
+    assert head.kpt_shape == (NKPT, NDIM)
 
 
 def test_validate_output_shape():

@@ -13,7 +13,7 @@
 ext/pico_pose/
 ├─ head.py      # PicoPoseNoBox / PicoDWBlock / PicoSE
 ├─ loss.py      # PicoPoseNoBoxLoss + ATSS / VFL / Wing
-├─ cfg/         # 模型结构 yaml
+├─ cfg/         # 模型结构 yaml（yolo12 / yolo11 两份）
 ├─ train.py     # 训练入口（默认用本目录的 yaml）
 ├─ tests/       # 结构、前向、导出通道的冒烟测试
 └─ README.md
@@ -40,6 +40,19 @@ pip install -e . --no-deps --no-build-isolation
 新增自定义头时，**不要**再往 `ultralytics/cfg/models/` 或 `ultralytics/utils/` 里塞文件；
 按同样方式在 `ext/<feature>/` 建目录，上游只留带 `# EXT:` 标记的接入行。
 
+## 与 YOLO11 / YOLO12 的兼容性
+
+头只依赖颈部输出的三层特征图（P3/8、P4/16、P5/32）和 `nc`/`kpt_shape`，
+与骨干类型无关，所以同一份 `PicoPoseNoBox` 可以直接挂到：
+
+| 配置 | 头输入层索引 | 4 点单类参数量（实测） |
+| --- | --- | --- |
+| `cfg/yolo12-pose-pico-nobox.yaml` | 14 / 17 / 20 | 2,207,175 |
+| `cfg/yolo11-pose-pico-nobox.yaml` | 16 / 19 / 22 | 2,228,967 |
+
+两个骨干的 `Pose` 头接口相同，yaml 里只把 `Pose` 换成 `PicoPoseNoBox` 即可；
+`PoseModel` / `PoseTrainer` / 损失都不用改。
+
 ## 输出通道契约（部署端必须对齐）
 
 设 `nc` 为类别数，`nkpt` 为关键点数，`ndim` 为每点维度（2 或 3）。
@@ -64,8 +77,14 @@ pip install -e . --no-deps --no-build-isolation
 ```bash
 cd /home/wbk/ultralytics
 
-# 方式一：直接用扩展入口（model 默认已指向 ext 里的 yaml）
+# 方式一：直接用扩展入口（model 默认已指向 yolo12 的 yaml）
 python -m ext.pico_pose.train \
+  data=/home/wbk/train_data/0802_1/windmill_4pt_pose.yaml \
+  imgsz=480,640 epochs=300 batch=16 device=0
+
+# YOLO11-pose 版本：同一个头，换成 11 的骨干/颈部
+python -m ext.pico_pose.train \
+  model=ext/pico_pose/cfg/yolo11-pose-pico-nobox.yaml \
   data=/home/wbk/train_data/0802_1/windmill_4pt_pose.yaml \
   imgsz=480,640 epochs=300 batch=16 device=0
 
