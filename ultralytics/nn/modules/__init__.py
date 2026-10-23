@@ -83,6 +83,7 @@ from .head import (
     Detect,
     LRPCHead,
     Pose,
+    PoseNoBox,
     Pose26,
     RTDETRDecoder,
     Segment,
@@ -93,6 +94,7 @@ from .head import (
     YOLOESegment26,
     v10Detect,
 )
+from .picopose import PicoPoseNoBox  # pico-overlay
 from .transformer import (
     AIFI,
     MLP,
@@ -166,6 +168,8 @@ __all__ = (
     "MSDeformAttn",
     "MaxSigmoidAttnBlock",
     "Pose",
+    "PoseNoBox",
+    "PicoPoseNoBox",
     "Pose26",
     "Proto",
     "RTDETRDecoder",
