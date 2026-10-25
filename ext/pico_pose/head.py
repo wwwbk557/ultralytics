@@ -5,7 +5,10 @@
 --------
 1. 每个 FPN 层只有一个 **共享** 的深度可分离特征块(DW kxk + PW 1x1 + BN + Hardswish),
    后面可以接一个 SE 通道门控(PicoDet 的 PicoSE);
-2. 特征块之后只有两个 1x1 卷积: 类别头 ``nc`` 与四点回归头 ``nk = nkpt * ndim``;
+2. 特征块之后是 **解耦输出块**: 每个分支各做一次 ``head_k x head_k`` 空间卷积
+   (默认 3x3 深度可分离 + BN + Hardswish), 再 1x1 投影到 ``nc`` / ``nk = nkpt * ndim``。
+   3x3 让相邻网格参与决策(空间感知), 也让类别数变多时分类头有足够容量;
+   ``head_k=1`` 可退回旧的单层 1x1 预测做 A/B;
 3. **没有 DFL, 也没有框回归分支** —— 网络参数里根本不存在 "框" 这个量;
 4. 解码约定与部署端 C++ (``fourpoints_detector.cpp::disPred2Bbox``) 完全一致::
 
@@ -17,16 +20,19 @@
    通道, 于是通道数 = ``nc + 2 * nkpt`` —— 与 C++ 里 ``cls_layer`` / ``dis_layer``
    两张输出张量的读法一一对应。
 
-可调参数(默认值即 "轻量 F=64")
------------------------------
+可调参数(默认值即 "轻量 F=64, 3x3 输出块")
+------------------------------------------
 ``PICO_HEAD_CFG`` 是模块级默认配置, 也可以在训练脚本里先改再建模型::
 
-    from ultralytics.nn.modules import picopose
-    picopose.PICO_HEAD_CFG.update(feat_out=96, use_se=True)
+    from ext.pico_pose import PICO_HEAD_CFG
+    PICO_HEAD_CFG.update(feat_out=96, use_se=True, head_k=3)
 
 命令行训练时可以用环境变量, 例如::
 
-    ULTRALYTICS_PICO_HEAD="feat_out=96,use_se=1" python -m ultralytics yolo pose train ...
+    ULTRALYTICS_PICO_HEAD="feat_out=96,use_se=1,head_k=3" python -m ultralytics yolo pose train ...
+
+``head_k=1`` 或 ``head_dw=0``(完整 3x3) 都可用于消融; 导出通道数只由 ``nc``/``nkpt``
+决定, 与 ``head_k`` 无关。
 
 变体
 ----
@@ -55,7 +61,7 @@ from ultralytics.nn.modules.conv import Conv
 from ultralytics.nn.modules.head import Pose
 from ultralytics.utils.tal import make_anchors
 
-__all__ = ("PicoPoseNoBox", "PicoPoseAuxBox", "PicoDWBlock", "PicoSE")
+__all__ = ("PicoPoseNoBox", "PicoPoseAuxBox", "PicoDWBlock", "PicoSE", "PicoHeadBlock")
 
 
 def _parse_cfg_from_env(cfg: dict) -> dict:
@@ -80,9 +86,25 @@ def _parse_cfg_from_env(cfg: dict) -> dict:
     return out
 
 
-# 默认: 与骨干同尺度(3 级共用的中间通道数), 2 层, 开 SE
+# 默认: 与骨干同尺度(3 级共用的中间通道数), 2 层, 开 SE, 输出前接 3x3 深度可分离空间块
 PICO_HEAD_CFG = _parse_cfg_from_env(
-    dict(feat_out=64, num_convs=2, use_se=True, k=5, export_xy_only=True, prior_prob=0.01, aux_box=False)
+    dict(
+        feat_out=64,
+        num_convs=2,
+        use_se=True,
+        k=5,
+        head_k=3,
+        head_dw=True,
+        export_xy_only=True,
+        # 部署导向的导出选项(默认关闭, 保持旧图 [B, C, A] + raw xy 不变):
+        #   export_row_major: 输出 [B, A, C], 每行一个候选, C++ 可直接顺序读
+        #   export_decode:    在图内把 kpt xy 解码成像素 ((anchor + raw) * stride)
+        #                     开启后 C++ 不再需要 anchor/stride 表
+        export_row_major=False,
+        export_decode=False,
+        prior_prob=0.01,
+        aux_box=False,
+    )
 )
 
 
@@ -119,13 +141,38 @@ class PicoSE(nn.Module):
         return self.conv(x * w)
 
 
+class PicoHeadBlock(nn.Module):
+    """解耦输出块: ``k x k`` 空间卷积(+BN+Hardswish) -> 1x1 预测.
+
+    ``3x3`` 让每个网格的预测参考邻域, 而不是只看当前点; 类别数 ``nc`` 较大时, 先做一次
+    非线性空间/通道混合再接 1x1, 分类边界更稳。``k=1`` 时退化为单层 1x1 预测(旧行为),
+    便于 A/B 消融。
+
+    Args:
+        cin: 输入通道数(即 ``feat_out``)。
+        cout: 输出通道数(``nc`` 或 ``nk``)。
+        k: 空间卷积核大小, 建议奇数; ``k=1`` 表示不加空间卷积。
+        dw: 是否用深度可分离卷积(``groups=cin``)。``False`` 时用完整 ``kxk`` 卷积。
+    """
+
+    def __init__(self, cin: int, cout: int, k: int = 3, dw: bool = True):
+        """按 ``k``/``dw`` 组装空间卷积与 1x1 输出; ``k=1`` 时空间卷积为 ``Identity``."""
+        super().__init__()
+        self.spatial = Conv(cin, cin, k, 1, g=cin if dw else 1, act=nn.Hardswish()) if k > 1 else nn.Identity()
+        self.pred = nn.Conv2d(cin, cout, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """前向: 空间卷积 -> 1x1 输出."""
+        return self.pred(self.spatial(x))
+
+
 class PicoPoseNoBox(Pose):
     """无框轻量 Pose 头(继承 ``Pose`` 以复用 validator/predictor 的 isinstance 分支).
 
     与 ``Pose`` 的区别:
 
     - 默认不创建 ``cv2``/``dfl``；``PicoPoseAuxBox`` 子类会加一个仅训练期使用的辅助框分支;
-    - 用 PicoFeat 风格的共享深度可分离特征块 + 两个 1x1 输出;
+    - 用 PicoFeat 风格的共享深度可分离特征块 + 解耦的 ``3x3 -> 1x1`` 输出块;
     - 训练时前向返回 ``{"scores", "kpts", "feats"}``(aux 子类多一个 ``boxes``), 交给
       ``PicoPoseNoBoxLoss`` / ``PicoAuxPoseLoss``;
     - 验证时用关键点 min/max 合成伪框, 使现有 ``PoseValidator``/NMS 可原样复用;
@@ -143,7 +190,11 @@ class PicoPoseNoBox(Pose):
         num_convs: int | None = None,
         use_se: bool | None = None,
         k: int | None = None,
+        head_k: int | None = None,
+        head_dw: bool | None = None,
         export_xy_only: bool | None = None,
+        export_row_major: bool | None = None,
+        export_decode: bool | None = None,
         prior_prob: float | None = None,
         aux_box: bool | None = None,
     ):
@@ -154,7 +205,11 @@ class PicoPoseNoBox(Pose):
         self.num_convs = int(cfg["num_convs"] if num_convs is None else num_convs)
         self.use_se = bool(cfg["use_se"] if use_se is None else use_se)
         self.dw_k = int(cfg["k"] if k is None else k)
+        self.head_k = int(cfg["head_k"] if head_k is None else head_k)
+        self.head_dw = bool(cfg["head_dw"] if head_dw is None else head_dw)
         self.export_xy_only = bool(cfg["export_xy_only"] if export_xy_only is None else export_xy_only)
+        self.export_row_major = bool(cfg["export_row_major"] if export_row_major is None else export_row_major)
+        self.export_decode = bool(cfg["export_decode"] if export_decode is None else export_decode)
         self.prior_prob = float(cfg["prior_prob"] if prior_prob is None else prior_prob)
         self.aux_box = bool(cfg["aux_box"] if aux_box is None else aux_box)
 
@@ -176,8 +231,8 @@ class PicoPoseNoBox(Pose):
                 blocks.append(PicoDWBlock(cin, self.feat_out, self.dw_k))
             stems.append(nn.Sequential(*blocks))
             ses.append(PicoSE(self.feat_out) if self.use_se else nn.Identity())
-            cls_head.append(nn.Conv2d(self.feat_out, nc, 1))
-            reg_head.append(nn.Conv2d(self.feat_out, self.nk, 1))
+            cls_head.append(PicoHeadBlock(self.feat_out, nc, self.head_k, self.head_dw))
+            reg_head.append(PicoHeadBlock(self.feat_out, self.nk, self.head_k, self.head_dw))
         self.stem = nn.ModuleList(stems)
         self.se = nn.ModuleList(ses)
         self.cls_pred = nn.ModuleList(cls_head)
@@ -226,50 +281,81 @@ class PicoPoseNoBox(Pose):
             y[:, :, 2] = y[:, :, 2].sigmoid()
         return y.reshape(bs, self.nk, -1)
 
+    def _export_flag(self, name: str) -> bool:
+        """导出开关: 环境变量显式设置优先, 其次模型属性(旧 checkpoint 可能没有该属性)."""
+        raw = os.environ.get("ULTRALYTICS_PICO_HEAD", "")
+        for item in raw.split(","):
+            key, _, _ = item.partition("=")
+            if key.strip() == name:
+                return bool(PICO_HEAD_CFG.get(name, False))
+        return bool(getattr(self, name, False))
+
+    def _decode_export(self, y: torch.Tensor) -> torch.Tensor:
+        """导出图内解码: ``[B, nc + nk, A]`` 的 raw kpt -> 像素坐标.
+
+        ``y`` 前 ``nc`` 个通道保持 ``sigmoid`` 后的分类分数; 后面是 ``raw xy``
+        (``export_xy_only=True``) 或 ``raw xy + vis logits``。解码约定与
+        :meth:`kpts_decode` 一致: ``p = (anchor + raw) * stride``。
+        """
+        bs = y.shape[0]
+        scores, raw = y[:, : self.nc], y[:, self.nc:]
+        nxy = 2 if self.export_xy_only else self.ndim
+        out_nk = self.nkpt * 2 if self.export_xy_only else self.nk
+        xy = raw.view(bs, self.nkpt, nxy, -1)
+        a, st = self.anchors, self.strides  # (2, A), (1, A)
+        kx = (xy[:, :, 0] + a[0]) * st
+        ky = (xy[:, :, 1] + a[1]) * st
+        if not self.export_xy_only and self.ndim == 3:
+            kp = torch.stack((kx, ky, xy[:, :, 2].sigmoid()), 2)
+        else:
+            kp = torch.stack((kx, ky), 2)
+        return torch.cat((scores, kp.reshape(bs, out_nk, -1)), 1)
+
     def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
-        """导出: ``nc + 2*nkpt`` 原始值; 验证: 伪框 + 分数 + 解码关键点."""
+        """导出: ``nc + 2*nkpt`` 原始值; 验证: 伪框(xywh) + 分数 + 解码关键点."""
         shape = x["feats"][0].shape
         if self.dynamic or self.shape != shape:
             self.anchors, self.strides = (t.transpose(0, 1) for t in make_anchors(x["feats"], self.stride, 0.5))
             self.shape = shape
         bs = x["scores"].shape[0]
 
-        if self.export:  # 交给 C++ 的 ct + raw * stride
+        if self.export:
             raw = x["kpts"]
             if self.export_xy_only:
                 raw = raw.view(bs, self.nkpt, self.ndim, -1)[:, :, :2].reshape(bs, self.nkpt * 2, -1)
-            return torch.cat((x["scores"].sigmoid(), raw), 1)
+            y = torch.cat((x["scores"].sigmoid(), raw), 1)  # [B, C, A]
+            if self._export_flag("export_decode"):
+                y = self._decode_export(y)
+            if self._export_flag("export_row_major"):
+                y = y.permute(0, 2, 1).contiguous()  # [B, A, C]
+            return y
 
-        # 验证: 关键点 min/max 合成伪框, 让现有 NMS / PoseValidator 不用改
+        # 验证: 关键点 min/max 合成伪框, 让现有 NMS / PoseValidator 不用改。
+        # 注意 NMS 约定前 4 列是 **xywh**(中心+宽高), 并会再做一次 xywh->xyxy;
+        # 这里若直接输出 xyxy, 框会被二次转换放大数倍, box 指标恒为 0。
         kpts = self.kpts_decode(x["kpts"]).view(bs, self.nkpt, self.ndim, -1)
         xs, ys = kpts[:, :, 0], kpts[:, :, 1]
-        dbox = torch.cat(
-            (
-                xs.min(1).values.unsqueeze(1),
-                ys.min(1).values.unsqueeze(1),
-                xs.max(1).values.unsqueeze(1),
-                ys.max(1).values.unsqueeze(1),
-            ),
-            1,
-        )
+        x1, y1 = xs.min(1).values, ys.min(1).values
+        x2, y2 = xs.max(1).values, ys.max(1).values
+        dbox = torch.stack(((x1 + x2) * 0.5, (y1 + y2) * 0.5, x2 - x1, y2 - y1), 1)  # xywh
         return torch.cat((dbox, x["scores"].sigmoid(), kpts.reshape(bs, self.nk, -1)), 1)
 
     def bias_init(self):
         """类别头初始化；aux 模式对齐 Detect 的 stride 相关 bias，避免 nc=1 时 cls loss 偏大."""
         for i, head in enumerate(self.cls_pred):
+            bias = head.pred.bias
             if self.aux_box:
-                head.bias.data[: self.nc] = math.log(5 / self.nc / (640 / self.stride[i]) ** 2)
+                bias.data[: self.nc] = math.log(5 / self.nc / (640 / self.stride[i]) ** 2)
             else:
-                head.bias.data[: self.nc] = math.log(self.prior_prob / (1 - self.prior_prob))
+                bias.data[: self.nc] = math.log(self.prior_prob / (1 - self.prior_prob))
         for head in self.reg_pred:
-            if head.bias is not None:
-                head.bias.data.zero_()
+            head.pred.bias.data.zero_()
         if self.aux_box:
             for head in self.cv2:
                 head[-1].bias.data.fill_(2.0)
 
     def fuse(self) -> None:
-        """无框头没有需要融合的 one2many 分支, 保留空实现以兼容 ``BaseModel.fuse``."""
+        """输出块的 Conv+BN 由 ``BaseModel.fuse`` 统一折叠; 这里没有 one2many 分支需要重参数化."""
         return
 
 

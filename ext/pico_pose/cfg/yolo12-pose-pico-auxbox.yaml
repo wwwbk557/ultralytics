@@ -55,5 +55,5 @@ head:
   - [[-1, 8], 1, Concat, [1]] # cat head P5
   - [-1, 2, C3k2, [1024, True]] # 20 (P5/32-large)
 
-  # 唯一改动: Pose -> PicoPoseAuxBox(辅助框 + 共享深度可分离特征 + 1x1 cls/reg)
+  # 唯一改动: Pose -> PicoPoseAuxBox(辅助框 + 共享深度可分离特征 + DW3x3->1x1 解耦输出)
   - [[14, 17, 20], 1, PicoPoseAuxBox, [nc, kpt_shape]] # PicoPoseAuxBox(P3, P4, P5)

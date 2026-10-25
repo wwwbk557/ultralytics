@@ -10,6 +10,7 @@ from __future__ import annotations
 __all__ = (
     "PICO_HEAD_CFG",
     "PicoDWBlock",
+    "PicoHeadBlock",
     "PicoPoseNoBox",
     "PicoPoseAuxBox",
     "PicoSE",
@@ -21,7 +22,7 @@ __all__ = (
     "wing_loss",
 )
 
-_HEAD_SYMBOLS = {"PICO_HEAD_CFG", "PicoDWBlock", "PicoPoseNoBox", "PicoPoseAuxBox", "PicoSE"}
+_HEAD_SYMBOLS = {"PICO_HEAD_CFG", "PicoDWBlock", "PicoHeadBlock", "PicoPoseNoBox", "PicoPoseAuxBox", "PicoSE"}
 _LOSS_SYMBOLS = {
     "PicoPoseNoBoxLoss",
     "PicoAuxPoseLoss",
