@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 from ultralytics.nn.autobackend import check_class_names
-from ext.pico_pose.head import PicoPoseAuxBox, PicoPoseNoBox  # EXT:pico_pose
+from ext.pico_pose.compact_head import PicoPoseCompactAuxBox
 from ultralytics.nn.modules import (
     AIFI,
     C1,
@@ -617,12 +617,10 @@ class PoseModel(DetectionModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the PoseModel."""
-        from ext.pico_pose.loss import PicoAuxPoseLoss, PicoPoseNoBoxLoss  # EXT:pico_pose
+        from ext.pico_pose.loss import PicoCompactPoseLoss
 
-        head = self.model[-1]
-        if isinstance(head, PicoPoseNoBox):  # EXT:pico_pose: Pico 头
-            # aux_box 模式复用官方 TAL + box/DFL + KeypointLoss；否则走 ATSS/Wing。
-            return PicoAuxPoseLoss(self) if getattr(head, "aux_box", False) else PicoPoseNoBoxLoss(self)
+        if isinstance(self.model[-1], PicoPoseCompactAuxBox):
+            return PicoCompactPoseLoss(self)
         return E2ELoss(self, PoseLoss26) if getattr(self, "end2end", False) else v8PoseLoss(self)
 
 
@@ -1695,8 +1693,7 @@ def parse_model(d, ch, verbose=True):
                 YOLOESegment,
                 YOLOESegment26,
                 Pose,
-                PicoPoseNoBox,
-                PicoPoseAuxBox,
+                PicoPoseCompactAuxBox,
                 Pose26,
                 OBB,
                 OBB26,
@@ -1705,7 +1702,7 @@ def parse_model(d, ch, verbose=True):
             args.extend([reg_max, end2end, [ch[x] for x in f]])
             if m is Segment or m is YOLOESegment or m is Segment26 or m is YOLOESegment26:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-            if m in {Detect, YOLOEDetect, Segment, Segment26, YOLOESegment, YOLOESegment26, Pose, PicoPoseNoBox, PicoPoseAuxBox, Pose26, OBB, OBB26}:
+            if m in {Detect, YOLOEDetect, Segment, Segment26, YOLOESegment, YOLOESegment26, Pose, PicoPoseCompactAuxBox, Pose26, OBB, OBB26}:
                 m.legacy = legacy
         elif m is v10Detect:
             args.append([ch[x] for x in f])
