@@ -106,6 +106,14 @@ cls_pw: 0.0 # (float) class weights power for handling class imbalance (0.0=disa
 dfl: 1.5 # (float) box distance loss gain (DFL when reg_max > 1, L1 on DFL-free YOLO26)
 pose: 12.0 # (float) pose loss gain (pose tasks)
 kobj: 1.0 # (float) keypoint objectness loss gain (pose tasks)
+color: 0.1 # (float) compact colour classification loss gain
+number: 0.1 # (float) compact number classification loss gain
+quality: 0.05 # (float) compact quality loss gain
+geom: 0.0 # (float) pose geometry regularization gain; 0 disables
+geom_par: 0.10 # (float) parallelogram residual weight
+geom_opp: 0.33 # (float) opposite-edge residual weight
+geom_angle: 0.23 # (float) right-angle residual weight
+geom_axis: 0.44 # (float) horizontal-edge residual weight
 rle: 1.0 # (float) rle loss gain (pose tasks)
 angle: 1.0 # (float) oriented angle loss gain (obb tasks)
 dlog: 1.0 # (float) depth log (SILog) loss gain (depth tasks)
