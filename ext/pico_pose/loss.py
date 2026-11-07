@@ -76,6 +76,7 @@ class PicoCompactPoseLoss(v8PoseLoss):
         assert not getattr(model.model[-1], "_obj_logit_calibrated", False), (
             "refusing to train against a calibrated objectness head (bias already baked into the weights)"
         )
+        self._unit_checked = False  # one-shot guard for the q_iou grid/px conversion
         self.color_map = torch.tensor(COLOR_BY_CLASS, device=self.device, dtype=torch.long)
         self.number_map = torch.tensor(ROLE_BY_CLASS, device=self.device, dtype=torch.long)
 
@@ -174,7 +175,17 @@ class PicoCompactPoseLoss(v8PoseLoss):
         q_soft = float(getattr(self.hyp, "quality_soft", 0.0))
         if q_soft > 0 and fg_mask.any():
             with torch.no_grad():
-                tb = (target_bboxes / stride_tensor.view(1, -1, 1))[fg_mask]  # xyxy, grid units
+                # target_bboxes leaves the assigner as *pixel* xyxy (get_assigned_targets_and_loss
+                # scaled them by imgsz before TAL, tal.py gathers gt_bboxes directly), so this is
+                # the one and only stride division -- calculate_keypoints_loss does the same.
+                tb = (target_bboxes / stride_tensor.view(1, -1, 1))[fg_mask]
+                if not self._unit_checked:
+                    hg, wg = float(preds["feats"][0].shape[2]), float(preds["feats"][0].shape[3])
+                    assert float(tb.max()) <= max(hg, wg) + 2.0, (
+                        f"target_bboxes units changed: /stride max={float(tb.max()):.1f} but the P3 grid is "
+                        f"{hg:.0f}x{wg:.0f}; pixel->grid conversion would be wrong"
+                    )
+                    self._unit_checked = True
                 pk = pred_kpts[fg_mask][..., :2]
                 x0, y0 = pk[..., 0].min(-1).values, pk[..., 1].min(-1).values
                 x1, y1 = pk[..., 0].max(-1).values, pk[..., 1].max(-1).values

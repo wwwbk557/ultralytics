@@ -204,8 +204,12 @@ def _resolve_obj_logit_bias(spec, data_yaml: Path, imgsz, pw_pow: float, topk: i
         split = str(cfg.get("train", "images/train"))
         img_dir = Path(split) if Path(split).is_absolute() else root / split
         imgs = [p for p in img_dir.rglob("*") if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}]
+        if not imgs:
+            raise ValueError(f"no images under {img_dir} (check data.yaml path/split)")
         lab_dir = Path(str(img_dir).replace(f"{os.sep}images{os.sep}", f"{os.sep}labels{os.sep}"))
         n_gt = sum(1 for f in lab_dir.glob("*.txt") for line in f.open() if line.strip())
+        if n_gt == 0:
+            raise ValueError(f"no labels under {lab_dir}")
         h, w = imgsz if isinstance(imgsz, (tuple, list)) else (imgsz, imgsz)
         anchors = sum((h // s) * (w // s) for s in (8, 16, 32))
         # TAL keeps the top-k anchors per GT but tiny/ambiguous GTs receive fewer.

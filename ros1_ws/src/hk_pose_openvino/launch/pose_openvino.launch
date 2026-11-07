@@ -1,19 +1,20 @@
 <launch>
   <!--
-    One launch: create the nodelet manager and load the OpenVINO pose plugin
-    into it. No standalone node + no extra python wrapper.
+    One launch: nodelet manager + OpenVINO compact-pose plugin (18ch raw output).
+    Single camera topic variable: the FULL compressed topic name, e.g.
+    image_topic:=/hk_camera/image_raw/compressed (camera or bag alike).
+    The nodelet subscribes sensor_msgs/CompressedImage directly and decodes
+    in-process — no republish, no transport suffix logic.
   -->
   <arg name="manager" default="hk_pose_manager" />
   <arg name="node_name" default="hk_pose_openvino" />
-  <arg name="model_path" default="$(find hk_pose_openvino)/models/epoch100_rm_23.onnx" />
+  <arg name="model_path" default="$(find hk_pose_openvino)/models/schemeC_obj4_480x640_18.onnx" />
   <arg name="device" default="CPU" />
-  <arg name="image_topic" default="/hk_camera/image_raw" />
+  <arg name="image_topic" default="/hk_camera/image_raw/compressed" />
   <arg name="output_topic" default="/hk_pose_openvino/image_result" />
-  <arg name="image_transport" default="compressed" />
   <arg name="conf_threshold" default="0.20" />
   <arg name="quality_threshold" default="0.05" />
   <arg name="nms_threshold" default="0.45" />
-  <arg name="raw_output" default="false" />
   <arg name="num_threads" default="0" />
   <arg name="queue_size" default="1" />
   <arg name="num_worker_threads" default="2" />
@@ -33,16 +34,15 @@
     <param name="device" value="$(arg device)" />
     <param name="image_topic" value="$(arg image_topic)" />
     <param name="output_topic" value="$(arg output_topic)" />
-    <param name="image_transport" value="$(arg image_transport)" />
     <param name="conf_threshold" value="$(arg conf_threshold)" />
     <param name="quality_threshold" value="$(arg quality_threshold)" />
     <param name="nms_threshold" value="$(arg nms_threshold)" />
-    <param name="raw_output" value="$(arg raw_output)" />
+    <param name="raw_output" value="true" />
     <param name="num_threads" value="$(arg num_threads)" />
     <param name="queue_size" value="$(arg queue_size)" />
     <param name="log_interval" value="$(arg log_interval)" />
     <param name="draw_labels" value="$(arg draw_labels)" />
     <param name="draw_points" value="$(arg draw_points)" />
-    <rosparam param="class_names">[blue_1, blue_2, blue_3, blue_4, blue_5, blue_guard, blue_outpost, red_1, red_2, red_3, red_4, red_5, red_guard, red_outpost]</rosparam>
+    <rosparam param="class_names">[blue_sentry, blue_hero, blue_engineer, blue_3, blue_4, blue_outpost, blue_base, red_sentry, red_hero, red_engineer, red_3, red_4, red_outpost, red_base]</rosparam>
   </node>
 </launch>

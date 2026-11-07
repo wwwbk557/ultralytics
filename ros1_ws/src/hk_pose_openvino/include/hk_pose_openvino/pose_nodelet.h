@@ -4,7 +4,7 @@
 #include <nodelet/nodelet.h>
 #include <dynamic_reconfigure/server.h>
 #include <image_transport/image_transport.h>
-#include <sensor_msgs/Image.h>
+#include <sensor_msgs/CompressedImage.h>
 
 #include <chrono>
 #include <memory>
@@ -28,7 +28,7 @@ class PoseNodelet : public nodelet::Nodelet {
   void onInit() override;
 
  private:
-  void imageCallback(const sensor_msgs::ImageConstPtr& msg);
+  void compressedCallback(const sensor_msgs::CompressedImageConstPtr& msg);
   void draw(cv::Mat* image, const std::vector<Detection>& detections,
             const DetectorTimings& timings);
   void reconfigureCallback(hk_pose_openvino::PoseConfigConfig& config, uint32_t level);
@@ -37,7 +37,7 @@ class PoseNodelet : public nodelet::Nodelet {
   std::vector<std::string> class_names_;
   std::vector<std::string> color_names_;
 
-  image_transport::Subscriber subscriber_;
+  ros::Subscriber subscriber_;
   image_transport::Publisher publisher_;
 
   std::unique_ptr<dynamic_reconfigure::Server<hk_pose_openvino::PoseConfigConfig>>

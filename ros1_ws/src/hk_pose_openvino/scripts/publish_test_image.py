@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Publish one image (or a directory of images) as sensor_msgs/Image.
+"""Publish one image (or a directory of images) as sensor_msgs/CompressedImage.
 
 Used by pose_openvino_test.launch to exercise the nodelet without a camera.
+The topic is the full compressed topic name, matching the nodelet's direct
+CompressedImage subscription.
 """
 from __future__ import print_function
 
@@ -12,12 +14,12 @@ import sys
 import cv2
 import rospy
 from cv_bridge import CvBridge
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage
 
 
 class TestImagePublisher(object):
     def __init__(self):
-        self.topic = rospy.get_param("~topic", "/hk_camera_cs/image_raw")
+        self.topic = rospy.get_param("~topic", "/hk_camera_cs/image_raw/compressed")
         self.fps = max(0.1, float(rospy.get_param("~fps", 10.0)))
         self.loop = bool(rospy.get_param("~loop", True))
         self.frame_id = rospy.get_param("~frame_id", "test_camera")
@@ -45,7 +47,7 @@ class TestImagePublisher(object):
             raise SystemExit("no readable image found at %s" % source)
 
         self.bridge = CvBridge()
-        self.publisher = rospy.Publisher(self.topic, Image, queue_size=1)
+        self.publisher = rospy.Publisher(self.topic, CompressedImage, queue_size=1)
         self.index = 0
         self.timer = rospy.Timer(rospy.Duration(1.0 / self.fps), self.tick)
 
@@ -59,9 +61,9 @@ class TestImagePublisher(object):
             return
         name, image = self.images[self.index % len(self.images)]
         try:
-            msg = self.bridge.cv2_to_imgmsg(image, encoding="bgr8")
+            msg = self.bridge.cv2_to_compressed_imgmsg(image, dst_format="jpg")
         except Exception as exc:  # pragma: no cover - defensive
-            rospy.logerr("cv2_to_imgmsg failed for %s: %s", name, exc)
+            rospy.logerr("cv2_to_compressed_imgmsg failed for %s: %s", name, exc)
             return
         msg.header.stamp = rospy.Time.now()
         msg.header.frame_id = self.frame_id

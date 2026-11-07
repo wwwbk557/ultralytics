@@ -1,11 +1,14 @@
 <launch>
+  <!--
+    Bag playback + compact-pose nodelet. image_topic is the FULL compressed
+    topic in the bag; the nodelet decodes in-process, no republish node.
+  -->
   <arg name="bag" default="/home/wbk/bags/catkin_ws/中央高地3m小陀螺1.bag" />
-  <arg name="model_path" default="$(find hk_pose_openvino)/models/epoch300_compact_nac_18.onnx" />
+  <arg name="model_path" default="$(find hk_pose_openvino)/models/schemeC_obj4_480x640_18.onnx" />
   <arg name="device" default="CPU" />
-  <arg name="conf_threshold" default="0.30" />
-  <arg name="raw_output" default="true" />
+  <arg name="image_topic" default="/hk_camera/image_raw/compressed" />
+  <arg name="conf_threshold" default="0.20" />
   <arg name="rate" default="1.0" />
-  <arg name="bag_topics" default="/hk_camera/image_raw/compressed" />
   <arg name="play_bag" default="true" />
   <arg name="manager" default="hk_pose_manager" />
   <arg name="node_name" default="hk_pose_openvino" />
@@ -21,27 +24,20 @@
         output="screen" required="true">
     <param name="model_path" value="$(arg model_path)" />
     <param name="device" value="$(arg device)" />
-    <param name="image_topic" value="/hk_camera_cs/image_raw" />
+    <param name="image_topic" value="$(arg image_topic)" />
     <param name="output_topic" value="$(arg output_topic)" />
-    <param name="image_transport" value="raw" />
     <param name="conf_threshold" value="$(arg conf_threshold)" />
     <param name="quality_threshold" value="0.05" />
     <param name="nms_threshold" value="0.45" />
-    <param name="raw_output" value="$(arg raw_output)" />
+    <param name="raw_output" value="true" />
     <param name="queue_size" value="1" />
     <param name="log_interval" value="30" />
     <param name="draw_labels" value="true" />
     <param name="draw_points" value="true" />
-    <rosparam param="class_names">[blue_1, blue_2, blue_3, blue_4, blue_5, blue_guard, blue_outpost, red_1, red_2, red_3, red_4, red_5, red_guard, red_outpost]</rosparam>
+    <rosparam param="class_names">[blue_sentry, blue_hero, blue_engineer, blue_3, blue_4, blue_outpost, blue_base, red_sentry, red_hero, red_engineer, red_3, red_4, red_outpost, red_base]</rosparam>
   </node>
 
-  <group if="$(arg play_bag)">
-    <node pkg="image_transport" type="republish" name="bag_to_raw"
-          args="compressed in:=/hk_camera/image_raw raw out:=/hk_camera_cs/image_raw"
-          output="screen" />
-
-    <node pkg="rosbag" type="play" name="bag_play"
-          args="$(arg bag) --topics $(arg bag_topics) --rate $(arg rate)"
-          output="screen" />
-  </group>
+  <node if="$(arg play_bag)" pkg="rosbag" type="play" name="bag_play"
+        args="$(arg bag) --topics $(arg image_topic) --rate $(arg rate)"
+        output="screen" />
 </launch>

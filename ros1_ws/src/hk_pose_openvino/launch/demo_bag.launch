@@ -1,0 +1,25 @@
+<launch>
+  <!--
+    Start-and-watch demo: play the chosen bag (looped), run the compact-pose
+    nodelet, and open rqt_image_view automatically.
+    Swap bags by passing bag:=/path/to.bag (image_topic defaults to the
+    standard hk_camera compressed topic; override only if the bag differs).
+  -->
+  <arg name="bag" default="/home/wbk/bags/catkin_ws/中央高地3m小陀螺1.bag" />
+  <arg name="image_topic" default="/hk_camera/image_raw/compressed" />
+  <arg name="rate" default="1.0" />
+  <arg name="view" default="true" />
+  <arg name="output_topic" default="/hk_pose_openvino/image_result" />
+
+  <include file="$(find hk_pose_openvino)/launch/pose_openvino.launch">
+    <arg name="image_topic" value="$(arg image_topic)" />
+    <arg name="output_topic" value="$(arg output_topic)" />
+  </include>
+
+  <node pkg="rosbag" type="play" name="bag_play"
+        args="$(arg bag) --loop --topics $(arg image_topic) --rate $(arg rate)"
+        output="screen" />
+
+  <node if="$(arg view)" pkg="rqt_image_view" type="rqt_image_view"
+        name="rqt_image_view" args="$(arg output_topic)" />
+</launch>

@@ -106,12 +106,10 @@ void PoseNodelet::onInit() {
 
   std::string image_topic;
   std::string output_topic;
-  std::string transport;
   int queue_size = 1;
-  pnh.param<std::string>("image_topic", image_topic, "/hk_camera_cs/image_raw");
+  pnh.param<std::string>("image_topic", image_topic, "/hk_camera/image_raw/compressed");
   pnh.param<std::string>("output_topic", output_topic,
                          "/hk_pose_openvino/image_result");
-  pnh.param<std::string>("image_transport", transport, "raw");
   pnh.param("queue_size", queue_size, 1);
   queue_size = std::max(1, queue_size);
 
@@ -132,10 +130,10 @@ void PoseNodelet::onInit() {
 
   image_transport::ImageTransport it(pnh);
   publisher_ = it.advertise(output_topic, 1);
-  image_transport::TransportHints hints(
-      transport, ros::TransportHints().tcpNoDelay(), pnh);
-  subscriber_ = it.subscribe(image_topic, queue_size,
-                             &PoseNodelet::imageCallback, this, hints);
+  // Direct CompressedImage subscription: image_topic is the full topic name
+  // (e.g. /hk_camera/image_raw/compressed); cv_bridge decodes in-process.
+  subscriber_ = pnh.subscribe(image_topic, queue_size,
+                              &PoseNodelet::compressedCallback, this);
 
   NODELET_INFO("model   : %s", model_path.c_str());
   NODELET_INFO("device  : %s", device.c_str());
@@ -149,8 +147,8 @@ void PoseNodelet::onInit() {
   NODELET_INFO("output  : %d anchors x %d channels (%d classes, layout %s)",
                detector_->numAnchors(), detector_->outputChannels(),
                detector_->numClasses(), layout_name);
-  NODELET_INFO("topics  : %s -> %s (transport=%s)", image_topic.c_str(),
-               output_topic.c_str(), transport.c_str());
+  NODELET_INFO("topics  : %s -> %s (compressed)", image_topic.c_str(),
+               output_topic.c_str());
   NODELET_INFO("thresholds: conf=%.2f quality=%.2f nms=%.2f my_color=%d",
                options.conf_threshold, options.quality_threshold,
                options.nms_threshold, options.my_color);
@@ -177,7 +175,8 @@ void PoseNodelet::reconfigureCallback(
                config.nms_threshold);
 }
 
-void PoseNodelet::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
+void PoseNodelet::compressedCallback(
+    const sensor_msgs::CompressedImageConstPtr& msg) {
   std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
   if (!lock.owns_lock()) {
     ++dropped_frames_;
@@ -186,14 +185,10 @@ void PoseNodelet::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
 
   cv::Mat bgr;
   try {
-    if (msg->encoding == sensor_msgs::image_encodings::BGR8) {
-      bgr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8)->image;
-    } else {
-      bgr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8)->image;
-    }
+    bgr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8)->image;
   } catch (const cv_bridge::Exception& e) {
-    NODELET_ERROR_THROTTLE(5.0, "cv_bridge failed (encoding=%s): %s",
-                           msg->encoding.c_str(), e.what());
+    NODELET_ERROR_THROTTLE(5.0, "cv_bridge failed (format=%s): %s",
+                           msg->format.c_str(), e.what());
     return;
   }
   if (bgr.empty()) {
