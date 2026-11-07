@@ -160,6 +160,25 @@ class PicoCompactPoseLoss(v8PoseLoss):
         self._track_assignment(batch, fg_mask, target_gt_idx, imgsz)
         pred_kpts = self.kpts_decode(anchor_points, pred_kpts.view(bs, -1, *self.kpt_shape))
 
+        # Soft objectness target for `quality_soft > 0`: IoU between the box that
+        # the four predicted corners would produce at deployment and the assigned
+        # GT box. That is the same quantity the deployment NMS uses to merge
+        # duplicates, so the objectness channel becomes a localisation-quality
+        # score instead of a plain foreground flag.
+        q_iou = None
+        q_soft = float(getattr(self.hyp, "quality_soft", 0.0))
+        if q_soft > 0 and fg_mask.any():
+            with torch.no_grad():
+                tb = (target_bboxes / stride_tensor.view(1, -1, 1))[fg_mask]  # xyxy, grid units
+                pk = pred_kpts[fg_mask][..., :2]
+                x0, y0 = pk[..., 0].min(-1).values, pk[..., 1].min(-1).values
+                x1, y1 = pk[..., 0].max(-1).values, pk[..., 1].max(-1).values
+                iw = (torch.minimum(x1, tb[:, 2]) - torch.maximum(x0, tb[:, 0])).clamp_min(0)
+                ih = (torch.minimum(y1, tb[:, 3]) - torch.maximum(y0, tb[:, 1])).clamp_min(0)
+                inter = iw * ih
+                union = (x1 - x0) * (y1 - y0) + (tb[:, 2] - tb[:, 0]) * (tb[:, 3] - tb[:, 1]) - inter
+                q_iou = inter / union.clamp_min(1e-9)
+
         keypoints = None
         if fg_mask.sum():
             keypoints = batch["keypoints"].to(self.device).float().clone()
@@ -230,6 +249,10 @@ class PicoCompactPoseLoss(v8PoseLoss):
             q_logits = preds["quality"].permute(0, 2, 1).reshape(-1).float()
             q_target_all = torch.zeros_like(q_logits)
             q_target_all[fg_mask.reshape(-1)] = 1.0
+            if q_iou is not None:
+                # (1 - s) + s * IoU keeps every positive well above the negatives
+                # while ordering them by the IoU the deployment NMS will see.
+                q_target_all[fg_mask.reshape(-1)] = (1.0 - q_soft) + q_soft * q_iou
             pw_pow = float(getattr(self.hyp, "obj_pw_pow", 0.5))
             q_pos_weight = ((q_logits.numel() - n_pos) / n_pos).clamp(1.0, 10000.0).pow(pw_pow)
             extra[2] = F.binary_cross_entropy_with_logits(

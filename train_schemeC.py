@@ -15,6 +15,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from pathlib import Path
@@ -132,6 +133,13 @@ def parse() -> argparse.Namespace:
     g.add_argument("--number", type=float, default=0.1, help="role loss weight")
     g.add_argument("--quality", type=float, default=0.05, help="objectness (channel 8) loss weight")
     g.add_argument("--obj-pw-pow", type=float, default=0.5, help="exponent on objectness pos_weight; 1=balanced, 0.5 background-heavy")
+    g.add_argument("--quality-soft", type=float, default=0.0,
+                   help="blend the deployment NMS IoU into the objectness target: tgt=(1-s)+s*IoU; 0 = hard 1/0")
+    g.add_argument("--obj-logit-bias", default="auto",
+                   help="objectness logit offset so sigmoid(z-bias) is calibrated; 'auto' = log(pos_weight) from the "
+                        "train labels, a number fixes it, 0 disables")
+    g.add_argument("--deploy-boxes", action=argparse.BooleanOptionalAction, default=True,
+                   help="validate/NMS with the box built from the 4 predicted corners (deployment parity)")
     g.add_argument("--geom", type=float, default=0.0)
     g.add_argument("--geom-par", type=float, default=0.10)
     g.add_argument("--geom-opp", type=float, default=0.33)
@@ -178,6 +186,36 @@ def _prepare_csv_for_resume(last_pt: Path) -> None:
     print(f"[train_schemeC] moved {csv_path.name} -> {dst.name} (fresh header for the new monitor columns)")
 
 
+def _resolve_obj_logit_bias(spec, data_yaml: Path, imgsz, pw_pow: float, topk: int = 10) -> float:
+    """Turn ``--obj-logit-bias auto`` into ``log(pos_weight)`` from the train labels.
+
+    ``pos_weight = (n_neg / n_pos) ** pw_pow`` with ``n_pos ≈ n_gt * anchors_per_gt``
+    and ``n_neg ≈ n_img * anchors_per_img``. Subtracting ``log(pos_weight)`` from the
+    objectness logit turns the inflated training probability back into a calibrated
+    foreground posterior, so ``obj >= 0.5`` means 50% again.
+    """
+    if str(spec).strip().lower() not in {"auto", "true", ""}:
+        return float(spec)
+    try:
+        import yaml
+
+        cfg = yaml.safe_load(data_yaml.read_text())
+        root = Path(cfg.get("path", data_yaml.parent))
+        split = str(cfg.get("train", "images/train"))
+        img_dir = Path(split) if Path(split).is_absolute() else root / split
+        imgs = [p for p in img_dir.rglob("*") if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}]
+        lab_dir = Path(str(img_dir).replace(f"{os.sep}images{os.sep}", f"{os.sep}labels{os.sep}"))
+        n_gt = sum(1 for f in lab_dir.glob("*.txt") for line in f.open() if line.strip())
+        h, w = imgsz if isinstance(imgsz, (tuple, list)) else (imgsz, imgsz)
+        anchors = sum((h // s) * (w // s) for s in (8, 16, 32))
+        # TAL keeps the top-k anchors per GT but tiny/ambiguous GTs receive fewer.
+        p = min(max(n_gt * topk * 2 / 3 / (len(imgs) * anchors), 1e-9), 0.5)
+        return float(math.log(((1.0 - p) / p) ** pw_pow))
+    except Exception as e:  # never block training because of the calibration estimate
+        print(f"[train_schemeC] obj_logit_bias auto failed ({e}); using 0.0")
+        return 0.0
+
+
 def main() -> None:
     a = parse()
 
@@ -193,6 +231,8 @@ def main() -> None:
         print(f"[train_schemeC] ckpt epoch={ck.get('epoch', -1)} epochs={ck_args.get('epochs')} "
               f"imgsz={imgsz_ck} lr0={ck_args.get('lr0')} name={ck_args.get('name')}")
         print(f"[train_schemeC] trainer={trainer.__name__} (device={a.device}, workers={a.workers})")
+        print(f"[train_schemeC] pico eval: deploy_boxes={ck_args.get('deploy_boxes', True)} "
+              f"quality_soft={ck_args.get('quality_soft', 0.0)} obj_logit_bias={ck_args.get('obj_logit_bias', 0.0)}")
         model = YOLO(str(last))
         model.train(trainer=trainer, resume=str(last), device=a.device, workers=a.workers)
         return
@@ -200,6 +240,7 @@ def main() -> None:
     data = Path(a.data)
     if not data.is_file():
         raise SystemExit(f"data yaml not found: {data}")
+    a.obj_logit_bias = _resolve_obj_logit_bias(a.obj_logit_bias, data, a.imgsz, a.obj_pw_pow)
     cache = False if str(a.cache).lower() == "false" else a.cache
     auto_augment = None if str(a.auto_augment).lower() in {"none", "null", ""} else a.auto_augment
 
@@ -219,6 +260,8 @@ def main() -> None:
     print(f"[train_schemeC] data={a.data}")
     print(f"[train_schemeC] imgsz={a.imgsz} rect={rect} trainer={trainer.__name__}")
     print(f"[train_schemeC] init_weights={init_weights or 'FROM SCRATCH'}")
+    print(f"[train_schemeC] quality_soft={a.quality_soft} obj_logit_bias={a.obj_logit_bias:+.3f} "
+          f"(channel8: sigmoid(z - bias)) deploy_boxes={a.deploy_boxes}")
     aug_keys = ("hsv_h", "hsv_s", "hsv_v", "degrees", "translate", "scale", "fliplr", "mosaic", "mixup", "cutmix", "erasing")
     print("[train_schemeC] aug=" + " ".join(f"{k}={args[k]}" for k in aug_keys))
     model.train(trainer=trainer, **args)

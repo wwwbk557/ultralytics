@@ -18,6 +18,11 @@ Scoring (validation, NMS and mAP all use the same soft score):
     score = obj * softmax(colour)[c] * softmax(role)[r]
     class = argmax(colour) * 7 + argmax(role)
 
+``deploy_boxes=True`` (set by ``PicoRectTrainer`` from the run args) makes
+validation build the NMS box from the four decoded corners instead of the
+train-only DFL branch, so the reported mAP is the metric the exported graph
+actually achieves. The exported 18-channel tensor already contains no box at all.
+
 Objectness is a multiplier, not a 0/1 gate: the gate would drop the objectness
 ordering (obj=0.51 and obj=0.99 would tie) and leave NMS/mAP sorting on
 P(colour, role | object) alone. Deployment may additionally drop anchors below
@@ -41,6 +46,13 @@ __all__ = ("PicoPoseCompactAuxBox",)
 
 class PicoPoseCompactAuxBox(Pose):
     """Four-keypoint compact pose head with an auxiliary box branch."""
+
+    # Class-level defaults keep checkpoints pickled before these flags existed
+    # loadable: unpickling restores __dict__ only, never the new __init__ keys.
+    obj_threshold = 0.5
+    deploy_filter = False
+    deploy_boxes = False
+    obj_logit_bias = 0.0
 
     def __init__(
         self,
@@ -80,6 +92,15 @@ class PicoPoseCompactAuxBox(Pose):
         # the deployment gate in validation runs.
         self.obj_threshold = float(kwargs.pop("obj_threshold", 0.5))
         self.deploy_filter = bool(kwargs.pop("deploy_filter", False))
+        # Deployment parity: the exported graph has no box branch, so deployment
+        # builds the NMS box from the four decoded corners. `deploy_boxes` makes
+        # validation/NMS use that same box instead of the train-only DFL branch.
+        self.deploy_boxes = bool(kwargs.pop("deploy_boxes", False))
+        # Optional objectness calibration: sigmoid(z - obj_logit_bias) in [0, 1]
+        # lands on the true foreground posterior when the bias equals
+        # log(pos_weight) used during training. It is subtracted from the exported
+        # channel-8 logit so the deployment sigmoid is calibrated too.
+        self.obj_logit_bias = float(kwargs.pop("obj_logit_bias", 0.0))
         self.extra_loss_names = ("color_loss", "number_loss", "quality_loss", "geom_loss")
         self.cv3 = None
         self.cv4 = None
@@ -159,12 +180,42 @@ class PicoPoseCompactAuxBox(Pose):
             self.shape = shape
         bs = x["kpts"].shape[0]
         if self.export:
-            return x["raw18"].permute(0, 2, 1).contiguous()
+            raw = x["raw18"]
+            if self.obj_logit_bias:
+                raw = raw.clone()
+                raw[:, self.nk] -= self.obj_logit_bias
+            return raw.permute(0, 2, 1).contiguous()
 
         kpts = self.kpts_decode(x["kpts"]).view(bs, self.nkpt, self.ndim, -1)
-        dbox = self.decode_bboxes(self.dfl(x["boxes"]), self.anchors.unsqueeze(0)) * self.strides
-        scores = self._class_scores(x["quality"].sigmoid(), x["color"].softmax(1), x["number"].softmax(1))
+        if self.deploy_boxes:
+            dbox = self._corner_bboxes(kpts)
+        else:
+            dbox = self.decode_bboxes(self.dfl(x["boxes"]), self.anchors.unsqueeze(0)) * self.strides
+        scores = self._class_scores(self.obj_prob(x["quality"]), x["color"].softmax(1), x["number"].softmax(1))
         return torch.cat((dbox, scores, kpts.reshape(bs, self.nk, -1)), 1)
+
+    def obj_prob(self, logits: torch.Tensor) -> torch.Tensor:
+        """Objectness probability, optionally de-biased by ``obj_logit_bias``."""
+        return (logits - self.obj_logit_bias).sigmoid()
+
+    @staticmethod
+    def _corner_bboxes(kpts: torch.Tensor) -> torch.Tensor:
+        """Axis-aligned box (xywh, input pixels) around the four decoded corners.
+
+        Args:
+            kpts: ``(B, 4, 2, A)`` decoded corners in input-image pixels.
+
+        Returns:
+            ``(B, 4, A)`` boxes in xywh, the format ``non_max_suppression`` expects.
+            This is exactly the box the deployment decoder builds, and it is also
+            exactly how the ground-truth boxes were derived from the labels.
+        """
+        xs, ys = kpts[:, :, 0], kpts[:, :, 1]
+        x0, x1 = xs.min(1).values, xs.max(1).values
+        y0, y1 = ys.min(1).values, ys.max(1).values
+        return torch.cat(
+            (((x0 + x1) * 0.5)[:, None], ((y0 + y1) * 0.5)[:, None], (x1 - x0)[:, None], (y1 - y0)[:, None]), 1
+        )
 
     def _class_scores(
         self, obj: torch.Tensor, color_p: torch.Tensor, number_p: torch.Tensor

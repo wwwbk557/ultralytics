@@ -62,6 +62,30 @@ objectness 的 BCE 用 `pos_weight = (n_neg / n_pos) ** obj_pw_pow`（mean reduc
   背景压得更低，适合把 objectness 当门控用；
 - 想更强背景抑制调到 0.25，想找回召调到 0.75。
 
+## 验证即部署（deploy parity，默认开）
+
+`deploy_boxes=True`（`PicoRectTrainer` 从训练参数里推到 head 上）让 **val/NMS 用 4 个预测角点
+合成框**，而不是训练用的 `cv2`+DFL 分支——导出图里本来就没有 box。同一个 checkpoint、同一
+768 张 val 子集，两种框的差别：
+
+| NMS 框 | mAP50(P) | mAP50-95(P) | P | R |
+|---|---|---|---|---|
+| DFL box 分支 | 0.8522 | 0.8129 | 0.723 | 0.818 |
+| 4 角点合成 | **0.9085** | **0.8604** | 0.871 | 0.838 |
+
+关掉用 `--no-deploy-boxes`。注意这会让 `results.csv` 的 mAP 口径变化，跨版本比较时先对齐。
+
+## 目标质量与 objectness 校准（可选）
+
+- `--quality-soft 0.3~0.5`：objectness 正样本目标从硬 1.0 改成
+  `(1-s) + s * IoU(角点框, GT 框)`。负样本仍是 0，所以门控语义不变，但正样本之间按
+  **部署 NMS 实际使用的 IoU** 排序（默认 0 = 旧行为）。
+- `--obj-logit-bias auto`：训练时 `pos_weight ≈ 26`，`sigmoid(logit)` 不是概率
+  （0.5 只对应真实前景 3.7%）。auto 用训练集先验算出 `log(pos_weight)` 并写进 head；
+  验证时算 `sigmoid(z - bias)`，导出时**直接减在通道 8 的 logit 上**，端侧 sigmoid 不变。
+- 导出：`python scripts/export_pico.py --weights best.pt --format onnx`，会把 ckpt 里的
+  `obj_logit_bias` 烘进 ONNX。
+
 ## 导出
 
 `head.export = True` 时只执行 `cv_compact`，输出 `[B, A, 18]`：

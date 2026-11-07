@@ -163,3 +163,31 @@ def test_invalid_shapes_raise():
         PicoPoseCompactAuxBox(nc=14, kpt_shape=(4, 3), ch=(16, 32, 64))
     with pytest.raises(ValueError, match="nc"):
         PicoPoseCompactAuxBox(nc=21, kpt_shape=(4, 2), ch=(16, 32, 64))
+
+
+def test_deploy_boxes_and_obj_logit_bias():
+    """Validation boxes must match the 4-corner extent, and export ch8 shifts by the bias."""
+    model = _model()
+    head = model.model[-1]
+    model.eval()
+    with torch.no_grad():
+        head.deploy_boxes = True
+        y, preds = model(torch.randn(1, 3, 480, 640))
+    k = head.kpts_decode(preds["kpts"]).view(1, head.nkpt, head.ndim, -1)
+    xs, ys = k[:, :, 0], k[:, :, 1]
+    x0, x1 = xs.min(1).values, xs.max(1).values
+    y0, y1 = ys.min(1).values, ys.max(1).values
+    want = torch.cat(
+        (((x0 + x1) * 0.5)[:, None], ((y0 + y1) * 0.5)[:, None], (x1 - x0)[:, None], (y1 - y0)[:, None]), 1
+    )
+    assert torch.allclose(y[:, :4], want, atol=1e-4)
+
+    head.export = True
+    head.obj_logit_bias = 0.0
+    with torch.no_grad():
+        a = head(preds["feats"])
+    head.obj_logit_bias = 2.0
+    with torch.no_grad():
+        b = head(preds["feats"])
+    assert torch.allclose(a[..., head.nk] - b[..., head.nk], torch.full_like(a[..., 0], 2.0), atol=1e-5)
+    assert torch.allclose(a[..., : head.nk], b[..., : head.nk])

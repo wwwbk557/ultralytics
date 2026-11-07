@@ -108,6 +108,9 @@ color: 0.1 # (float) compact colour classification loss gain
 number: 0.1 # (float) compact number classification loss gain
 quality: 0.05 # (float) compact objectness (channel 8) loss gain
 obj_pw_pow: 0.5 # (float) exponent on objectness pos_weight (1.0 = balanced, <1 favours background)
+quality_soft: 0.0 # (float) blend IoU into the objectness target (0 = hard 1/0 foreground flag)
+obj_logit_bias: 0.0 # (float) subtract from the objectness logit (log(pos_weight)) so sigmoid is calibrated
+deploy_boxes: True # (bool) validation/NMS use the box built from the 4 corners, i.e. the exported graph
 geom: 0.0 # (float) pose geometry regularization gain; 0 disables
 geom_par: 0.10 # (float) parallelogram residual weight
 geom_opp: 0.33 # (float) opposite-edge residual weight

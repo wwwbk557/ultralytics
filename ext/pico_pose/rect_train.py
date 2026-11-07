@@ -138,6 +138,29 @@ class PicoRectTrainer(PoseTrainer):
             LOGGER.info(f"rectangular training: installed {n} RectMosaic for imgsz={tuple(int(x) for x in self.args.imgsz)}")
         return dataset
 
+    def setup_model(self):
+        """Load the model and push the Pico eval flags from the run args onto the head.
+
+        The flags must live on the head *before* ``ModelEMA`` copies the model,
+        so the EMA used for validation inherits them (and a resumed EMA too).
+        """
+        ckpt = super().setup_model()
+        self._apply_pico_eval_flags(self.model)
+        return ckpt
+
+    def _apply_pico_eval_flags(self, model) -> None:
+        """Align validation with the exported graph (corner boxes + objectness bias)."""
+        head = getattr(unwrap_model(model), "model", None)
+        head = head[-1] if head is not None else None
+        if head is None or not hasattr(head, "deploy_boxes"):
+            return
+        head.deploy_boxes = bool(getattr(self.args, "deploy_boxes", False))
+        head.obj_logit_bias = float(getattr(self.args, "obj_logit_bias", 0.0))
+        LOGGER.info(
+            f"pico eval parity: deploy_boxes={head.deploy_boxes} "
+            f"obj_logit_bias={head.obj_logit_bias:+.3f} (sigmoid(z - bias) on channel 8)"
+        )
+
     def validate(self):
         """Run the stock validation plus the objectness/TAL monitors."""
         from .monitor import ObjectnessMonitor
