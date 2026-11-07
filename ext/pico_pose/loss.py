@@ -1,20 +1,27 @@
 """Loss functions for the compact four-keypoint pose head.
 
 ``PicoCompactPoseLoss`` combines TAL assignment, CIoU/DFL box loss,
-OKS keypoint loss and visibility BCE with three attribute terms (colour,
-number, quality) and an optional pose-geometry regularizer. The returned vector
-is ``[box, pose, kobj, cls, dfl, color, number, quality, geom]``.
+OKS keypoint loss and visibility BCE with three attribute terms (colour, role,
+objectness) and an optional pose-geometry regularizer. The returned vector is
+``[box, pose, kobj, cls, dfl, color, number, quality, geom]``.
+
+The ``quality`` slot (channel 8 of the compact export) is trained as
+*objectness*: 1 on every TAL-positive anchor, 0 elsewhere. ``colour`` and
+``number`` are cross-entropy trained on those positives only, and at inference
+they decide the class while objectness only gates the anchor.
 """
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from ultralytics.utils.loss import v8PoseLoss
 
-from .attrs import COLOR_BY_CLASS, NUMBER_BY_CLASS
+from .attrs import COLOR_BY_CLASS, NUM_ROLE, ROLE_BY_CLASS
+from .monitor import assignment_summary, hist_auc
 
 __all__ = ("PicoCompactPoseLoss", "pose_geometry_loss")
 
@@ -59,20 +66,81 @@ def pose_geometry_loss(
     return par * par_term + opp * opp_term + angle * angle_term + axis * axis_term
 
 
-def _oks_quality(pred_xy: torch.Tensor, gt_xy: torch.Tensor, area: torch.Tensor, k: float = 0.1) -> torch.Tensor:
-    """Return an OKS-like quality target from detached predicted keypoints."""
-    d2 = ((pred_xy - gt_xy) ** 2).sum(-1)
-    sigma2 = (2.0 * area[:, None] * (k**2)).clamp_min(1e-6)
-    return torch.exp(-d2 / sigma2).mean(1).clamp(0, 1)
-
-
 class PicoCompactPoseLoss(v8PoseLoss):
-    """TAL box/pose loss with colour, number, quality and geometry terms."""
+    """TAL box/pose loss with colour, role, objectness (channel 8) and geometry terms."""
 
     def __init__(self, model):
         super().__init__(model)
         self.color_map = torch.tensor(COLOR_BY_CLASS, device=self.device, dtype=torch.long)
-        self.number_map = torch.tensor(NUMBER_BY_CLASS, device=self.device, dtype=torch.long)
+        self.number_map = torch.tensor(ROLE_BY_CLASS, device=self.device, dtype=torch.long)
+
+    # ---- epoch-level monitors (TAL ranking / cv_joint vs attribute agreement) ----
+    def _monitors(self) -> dict:
+        if not hasattr(self, "_mon") or self._mon is None:
+            dev = self.device
+
+            def z():
+                return torch.zeros((), device=dev, dtype=torch.float64)
+
+            self._mon = {
+                "pos_hist": torch.zeros(100, device=dev, dtype=torch.float64),
+                "neg_hist": torch.zeros(100, device=dev, dtype=torch.float64),
+                "pos_sum": z(),
+                "neg_sum": z(),
+                "pos_n": z(),
+                "neg_n": z(),
+                "agree": z(),
+                "agree_n": z(),
+                "assign_areas": [],
+                "assign_counts": [],
+            }
+        return self._mon
+
+    def pop_monitors(self) -> dict[str, float]:
+        """Return the epoch's TAL/attribute monitors and start a fresh window."""
+        if not hasattr(self, "_mon") or self._mon is None:
+            return {}
+        m = self._mon
+        self._mon = None
+        nan = float("nan")
+        # keep the keys stable so results.csv headers never shift between epochs
+        out: dict[str, float] = {"mon/s_auc": nan, "mon/s_gap": nan, "mon/attr_agree": nan}
+        pos_n, neg_n = float(m["pos_n"]), float(m["neg_n"])
+        if pos_n > 0 and neg_n > 0:
+            out["mon/s_auc"] = hist_auc(m["pos_hist"].cpu().numpy(), m["neg_hist"].cpu().numpy())
+            out["mon/s_gap"] = float(m["pos_sum"] / pos_n - m["neg_sum"] / neg_n)
+        if float(m["agree_n"]) > 0:
+            out["mon/attr_agree"] = float(m["agree"] / m["agree_n"])
+        if m.get("assign_areas"):
+            out.update(
+                assignment_summary(
+                    np.concatenate(m["assign_areas"]),
+                    np.concatenate(m["assign_counts"]),
+                    int(self.assigner.topk),
+                )
+            )
+        return out
+
+    def _track_assignment(self, batch: dict, fg_mask: torch.Tensor, target_gt_idx: torch.Tensor, imgsz: torch.Tensor) -> None:
+        """Count, for every GT, how many anchors TAL actually assigned to it."""
+        with torch.no_grad():
+            boxes = batch["bboxes"].reshape(-1, 4).float()
+            if boxes.numel() == 0:
+                return
+            bidx = batch["batch_idx"].reshape(-1).long()
+            w, h = float(imgsz[1]), float(imgsz[0])
+            areas = (boxes[:, 2] * w) * (boxes[:, 3] * h)
+            counts = torch.zeros(len(boxes), device=boxes.device, dtype=torch.float32)
+            for b in range(fg_mask.shape[0]):
+                sel = (bidx == b).nonzero(as_tuple=True)[0]
+                if sel.numel() == 0 or not fg_mask[b].any():
+                    continue
+                idx = target_gt_idx[b][fg_mask[b]].long()
+                n_gt = int(sel.numel())
+                counts[sel] = torch.bincount(idx, minlength=n_gt)[:n_gt].float()
+            mon = self._monitors()
+            mon["assign_areas"].append(areas.detach().cpu().numpy())
+            mon["assign_counts"].append(counts.detach().cpu().numpy())
 
     def loss(self, preds: dict, batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the weighted loss and its detached per-term vector."""
@@ -82,12 +150,16 @@ class PicoCompactPoseLoss(v8PoseLoss):
         (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor), det_loss, _ = (
             self.get_assigned_targets_and_loss(preds, batch)
         )
+        # The TAL assigner returns float zeros when the whole batch has no GT
+        # (n_max_boxes == 0), everything else returns bool; normalise here because
+        # bool masks are used as indices below and `~mask` needs a bool tensor.
+        fg_mask = fg_mask.bool()
         loss[0], loss[3], loss[4] = det_loss[0], det_loss[1], det_loss[2]
 
         imgsz = torch.tensor(preds["feats"][0].shape[2:], device=self.device, dtype=pred_kpts.dtype) * self.stride[0]
+        self._track_assignment(batch, fg_mask, target_gt_idx, imgsz)
         pred_kpts = self.kpts_decode(anchor_points, pred_kpts.view(bs, -1, *self.kpt_shape))
 
-        target_bboxes_px = target_bboxes.clone()
         keypoints = None
         if fg_mask.sum():
             keypoints = batch["keypoints"].to(self.device).float().clone()
@@ -106,6 +178,23 @@ class PicoCompactPoseLoss(v8PoseLoss):
         loss[2] *= self.hyp.kobj
         loss = loss * bs
 
+        with torch.no_grad():
+            mon = self._monitors()
+            s_max = preds["scores"].permute(0, 2, 1).sigmoid().max(-1).values  # (B, A)
+            pos, neg = fg_mask, ~fg_mask
+            bins = 100
+            # bincount instead of histc: histc has no deterministic CUDA kernel, which
+            # warns on every batch when --deterministic is on.
+            idx = (s_max.detach() * (bins - 1)).long().clamp_(0, bins - 1)
+            if pos.any():
+                mon["pos_hist"] += torch.bincount(idx[pos], minlength=bins).double()
+                mon["pos_sum"] += s_max[pos].double().sum()
+                mon["pos_n"] += pos.sum()
+            if neg.any():
+                mon["neg_hist"] += torch.bincount(idx[neg], minlength=bins).double()
+                mon["neg_sum"] += s_max[neg].double().sum()
+                mon["neg_n"] += neg.sum()
+
         n_pos = fg_mask.sum().clamp_min(1)
         extra = torch.zeros(4, device=self.device, dtype=torch.float32)
         if fg_mask.any():
@@ -119,23 +208,30 @@ class PicoCompactPoseLoss(v8PoseLoss):
                 number_logits = preds["number"][b].permute(1, 0)[m].float()
                 extra[0] += F.cross_entropy(color_logits, self.color_map[gt_cls], reduction="sum")
                 extra[1] += F.cross_entropy(number_logits, self.number_map[gt_cls], reduction="sum")
+                with torch.no_grad():
+                    # do the two classification paths agree on the positive anchors?
+                    joint_cls = preds["scores"][b].permute(1, 0)[m].argmax(-1)
+                    attr_cls = color_logits.argmax(-1) * NUM_ROLE + number_logits.argmax(-1)
+                    mon = self._monitors()
+                    mon["agree"] += (joint_cls == attr_cls).sum()
+                    mon["agree_n"] += m.sum()
 
             pred_px = pred_kpts * stride_tensor.view(1, -1, 1, 1)
-            selected = self._select_target_keypoints(
-                keypoints,
-                batch["batch_idx"].view(-1, 1),
-                target_gt_idx,
-                fg_mask,
-            )
-            pred_pos = pred_px[fg_mask][..., :2].float().detach()
-            gt_pos = selected[fg_mask][..., :2].float()
-            tb = target_bboxes_px[fg_mask]
-            area = ((tb[:, 2] - tb[:, 0]) * (tb[:, 3] - tb[:, 1])).clamp_min(1.0)
-            q_target = _oks_quality(pred_pos, gt_pos, area)
+
+            # Channel 8 is objectness, not a quality regression: 1 on TAL positives,
+            # 0 on every other anchor. It is used as a gate at inference, so it must
+            # learn background suppression rather than localisation quality.
+            #
+            # pos_weight = (n_neg / n_pos) ** obj_pw_pow. With mean reduction an
+            # exponent of 1 is class-balanced, so every anchor with a true
+            # posterior above ~1/w is pushed above 0.5 (background near objects
+            # included). The default 0.5 keeps positives high while letting
+            # negatives dominate the total, which is what suppresses background.
             q_logits = preds["quality"].permute(0, 2, 1).reshape(-1).float()
             q_target_all = torch.zeros_like(q_logits)
-            q_target_all[fg_mask.reshape(-1)] = q_target
-            q_pos_weight = ((q_logits.numel() - n_pos) / n_pos).clamp(1.0, 10000.0)
+            q_target_all[fg_mask.reshape(-1)] = 1.0
+            pw_pow = float(getattr(self.hyp, "obj_pw_pow", 0.5))
+            q_pos_weight = ((q_logits.numel() - n_pos) / n_pos).clamp(1.0, 10000.0).pow(pw_pow)
             extra[2] = F.binary_cross_entropy_with_logits(
                 q_logits, q_target_all, reduction="mean", pos_weight=q_pos_weight
             )

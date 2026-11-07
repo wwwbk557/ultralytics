@@ -1,15 +1,27 @@
-"""Compact four-keypoint pose head with colour and number attribute branches.
+"""Compact four-keypoint pose head with colour and role attribute branches.
 
 Per pyramid level the head contains:
 
 * ``cv2``: Conv3x3(64) -> Conv3x3(64) -> Conv1x1(4 * reg_max) box distribution.
 * ``cv_shared``: depthwise Conv3x3 -> Conv1x1(32), BN + SiLU.
-* ``cv_compact``: Conv1x1(32 -> 18): 8 keypoint, 1 quality, 2 colour, 7 number.
-* ``cv_joint``: Conv1x1(32 -> nc) class logits used by the assigner.
+* ``cv_compact``: Conv1x1(32 -> 18): 8 keypoint, 1 objectness, 2 colour, 7 role.
+* ``cv_joint``: Conv3x3(32->64) -> Conv3x3(64->64) -> Conv1x1(64->nc) class logits\n  used by the assigner (TAL).
 
 ``cv2`` and ``dfl`` are training/validation branches. Exporting uses only
-``cv_compact`` and returns ``[B, A, 18]`` with raw keypoint offsets, quality
-logit, colour logits and number logits.
+``cv_compact`` and returns ``[B, A, 18]`` with raw keypoint offsets, the
+objectness logit (channel 8, still named ``quality`` in the export), colour logits and
+role logits.
+
+Scoring (validation, NMS and mAP all use the same soft score):
+
+    obj   = sigmoid(objectness)                       # trained as foreground BCE
+    score = obj * softmax(colour)[c] * softmax(role)[r]
+    class = argmax(colour) * 7 + argmax(role)
+
+Objectness is a multiplier, not a 0/1 gate: the gate would drop the objectness
+ordering (obj=0.51 and obj=0.99 would tie) and leave NMS/mAP sorting on
+P(colour, role | object) alone. Deployment may additionally drop anchors below
+``obj_threshold``; survivors keep the same soft score.
 """
 
 from __future__ import annotations
@@ -50,23 +62,28 @@ class PicoPoseCompactAuxBox(Pose):
         self.nl = len(ch)
         self.reg_max = int(reg_max)
         self.num_colors = 2
-        self.num_numbers = 7
-        if self.nc != self.num_colors * self.num_numbers:
-            raise ValueError("PicoPoseCompactAuxBox requires nc = num_colors * num_numbers = 14")
-        self.compact_no = self.nk + 1 + self.num_colors + self.num_numbers
+        self.num_roles = 7
+        if self.nc != self.num_colors * self.num_roles:
+            raise ValueError("PicoPoseCompactAuxBox requires nc = num_colors * num_roles = 14")
+        self.compact_no = self.nk + 1 + self.num_colors + self.num_roles
         self.no_export = self.compact_no
         self.no = self.nc + 4 * self.reg_max
         self.head_channels = int(head_channels)
+
         self.aux_box = True
         self.multi_head = True
         self.export_xy_only = True
         self.export_row_major = True
         self.export = False
+        # Channel 8 is trained as objectness and always multiplies the class
+        # probability. `obj_threshold`/`deploy_filter` only exist to reproduce
+        # the deployment gate in validation runs.
+        self.obj_threshold = float(kwargs.pop("obj_threshold", 0.5))
+        self.deploy_filter = bool(kwargs.pop("deploy_filter", False))
         self.extra_loss_names = ("color_loss", "number_loss", "quality_loss", "geom_loss")
         self.cv3 = None
         self.cv4 = None
         self._end2end = False
-        self.legacy = False
         self.stride = torch.zeros(self.nl)
         self.shape = None
         self.dynamic = False
@@ -86,8 +103,16 @@ class PicoPoseCompactAuxBox(Pose):
             )
             for c in ch
         )
+        # Same capacity as a YOLOv8 cls branch: 3x3(32->64) -> 3x3(64->64) -> 1x1(64->nc).
+        self.cv_joint = nn.ModuleList(
+            nn.Sequential(
+                Conv(self.head_channels, 64, 3),
+                Conv(64, 64, 3),
+                nn.Conv2d(64, self.nc, 1),
+            )
+            for _ in ch
+        )
         self.cv_compact = nn.ModuleList(nn.Conv2d(self.head_channels, self.compact_no, 1) for _ in ch)
-        self.cv_joint = nn.ModuleList(nn.Conv2d(self.head_channels, self.nc, 1) for _ in ch)
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
     def forward(self, x: list[torch.Tensor]):
@@ -138,11 +163,40 @@ class PicoPoseCompactAuxBox(Pose):
 
         kpts = self.kpts_decode(x["kpts"]).view(bs, self.nkpt, self.ndim, -1)
         dbox = self.decode_bboxes(self.dfl(x["boxes"]), self.anchors.unsqueeze(0)) * self.strides
-        color_p = x["color"].softmax(1)
-        number_p = x["number"].softmax(1)
-        scores = (color_p[:, :, None] * number_p[:, None, :]).reshape(bs, self.nc, -1)
-        scores = scores * x["quality"].sigmoid()
+        scores = self._class_scores(x["quality"].sigmoid(), x["color"].softmax(1), x["number"].softmax(1))
         return torch.cat((dbox, scores, kpts.reshape(bs, self.nk, -1)), 1)
+
+    def _class_scores(
+        self, obj: torch.Tensor, color_p: torch.Tensor, number_p: torch.Tensor
+    ) -> torch.Tensor:
+        """Score anchors as objectness x colour x role (soft, no 0/1 gate).
+
+        Args:
+            obj: (B, 1, A) objectness probabilities (sigmoid of channel 8).
+            color_p: (B, num_colors, A) colour softmax probabilities.
+            number_p: (B, num_roles, A) role softmax probabilities.
+
+        Returns:
+            (B, nc, A) class scores. ``scores.sum(1) == obj`` because each
+            softmax is normalised before the product, so the 14-class product is
+            a distribution over the class set conditioned on the anchor being an
+            object.
+
+        Notes:
+            ``score = obj * P(colour, role)`` keeps the objectness ordering: an
+            obj=0.99 anchor always outranks an obj=0.51 anchor even when they
+            share the same class probabilities. A hard ``(obj >= threshold)``
+            gate would throw that ordering away and leave NMS/mAP sorting on
+            ``colour x role`` alone, which is only P(class | object).
+
+            When ``deploy_filter`` is True the anchor still scores ``obj *
+            class_prob``; the gate only decides membership (deployment parity).
+        """
+        class_prob = (color_p[:, :, None] * number_p[:, None, :]).reshape(obj.shape[0], self.nc, -1)
+        scores = obj * class_prob
+        if self.deploy_filter:
+            scores = scores * (obj >= self.obj_threshold).to(scores.dtype)
+        return scores
 
     def kpts_decode(self, kpts: torch.Tensor) -> torch.Tensor:
         """Decode raw offsets to grid coordinates as ``(anchor + raw) * stride``."""
@@ -159,9 +213,12 @@ class PicoPoseCompactAuxBox(Pose):
             b[0 : self.nk].zero_()
             b[self.nk] = -2.0
             b[self.nk + 1 :].zero_()
+        # for i, head in enumerate(self.cv_joint):
+        #     s = float(self.stride[i]) if float(self.stride[i]) > 0 else 8.0 * (2**i)
+        #     head.bias.data.fill_(math.log(5 / self.nc / (640 / s) ** 2))
         for i, head in enumerate(self.cv_joint):
             s = float(self.stride[i]) if float(self.stride[i]) > 0 else 8.0 * (2**i)
-            head.bias.data.fill_(math.log(5 / self.nc / (640 / s) ** 2))
+            head[-1].bias.data.fill_(math.log(5 / self.nc / (640 / s) ** 2))
         for head in self.cv2:
             head[-1].bias.data.fill_(2.0)
 

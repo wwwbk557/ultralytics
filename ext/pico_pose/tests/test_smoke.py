@@ -74,7 +74,10 @@ def test_head_structure():
         assert shared[0].conv.kernel_size == (3, 3) and shared[0].conv.groups == c
         assert shared[1].conv.out_channels == 32
         assert head.cv_compact[i].in_channels == 32 and head.cv_compact[i].out_channels == 18
-        assert head.cv_joint[i].in_channels == 32 and head.cv_joint[i].out_channels == NC
+        joint = head.cv_joint[i]
+        assert joint[0].conv.in_channels == 32 and joint[0].conv.out_channels == 64
+        assert joint[1].conv.in_channels == 64 and joint[1].conv.out_channels == 64
+        assert joint[2].in_channels == 64 and joint[2].out_channels == NC
 
 
 def test_export_is_raw18_row_major():

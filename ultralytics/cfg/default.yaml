@@ -106,7 +106,8 @@ pose: 12.0 # (float) pose loss gain (pose tasks)
 kobj: 1.0 # (float) keypoint objectness loss gain (pose tasks)
 color: 0.1 # (float) compact colour classification loss gain
 number: 0.1 # (float) compact number classification loss gain
-quality: 0.05 # (float) compact quality loss gain
+quality: 0.05 # (float) compact objectness (channel 8) loss gain
+obj_pw_pow: 0.5 # (float) exponent on objectness pos_weight (1.0 = balanced, <1 favours background)
 geom: 0.0 # (float) pose geometry regularization gain; 0 disables
 geom_par: 0.10 # (float) parallelogram residual weight
 geom_opp: 0.33 # (float) opposite-edge residual weight

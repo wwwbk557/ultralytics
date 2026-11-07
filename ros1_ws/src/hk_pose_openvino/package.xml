@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>hk_pose_openvino</name>
+  <version>1.0.0</version>
+  <description>
+    ROS1 nodelet plugin that runs the 1027 4-point pose model
+    (runs/yolo11-pose/1027/epoch100_rm_23.onnx, 23 channels) and the 0526
+    Infantry-v5 armor model (22 channels, 4 keypoints + 4 colors + 9 classes)
+    with OpenVINO, subscribes to an image topic and publishes an annotated
+    image with the four detected corner points connected into a box and the
+    per-frame detection time.
+  </description>
+  <maintainer email="wbk@todo.todo">wbk</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>nodelet</depend>
+  <depend>pluginlib</depend>
+  <depend>roscpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>image_transport</depend>
+  <depend>roslib</depend>
+  <depend>dynamic_reconfigure</depend>
+  <depend>libopencv-dev</depend>
+
+  <export>
+    <nodelet plugin="${prefix}/nodelet_plugins.xml" />
+  </export>
+</package>

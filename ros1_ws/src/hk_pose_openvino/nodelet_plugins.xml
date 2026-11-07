@@ -1,0 +1,11 @@
+<library path="lib/libhk_pose_openvino_nodelet">
+  <class
+      name="hk_pose_openvino/HkPoseOpenvinoNodelet"
+      type="hk_pose_openvino::PoseNodelet"
+      base_class_type="nodelet::Nodelet">
+    <description>
+      OpenVINO 4-point pose detector nodelet. Subscribes to an image topic and
+      publishes an annotated bgr8 image with four-point boxes and latency.
+    </description>
+  </class>
+</library>

@@ -1,0 +1,26 @@
+<launch>
+  <!--
+    Same as pose_openvino.launch, plus a fake camera that republishes the
+    bundled sample images on /hk_camera_cs/image_raw, so the whole pipeline can
+    be checked without the real camera.
+  -->
+  <arg name="image" default="$(find hk_pose_openvino)/test_images" />
+  <arg name="fps" default="10" />
+  <arg name="view" default="false" />
+  <arg name="output_topic" default="/hk_pose_openvino/image_result" />
+
+  <include file="$(find hk_pose_openvino)/launch/pose_openvino.launch">
+    <arg name="image_topic" value="/hk_camera_cs/image_raw" />
+    <arg name="output_topic" value="$(arg output_topic)" />
+  </include>
+
+  <node pkg="hk_pose_openvino" type="publish_test_image.py"
+        name="test_image_publisher" output="screen">
+    <param name="image" value="$(arg image)" />
+    <param name="topic" value="/hk_camera_cs/image_raw" />
+    <param name="fps" value="$(arg fps)" />
+  </node>
+
+  <node if="$(arg view)" pkg="rqt_image_view" type="rqt_image_view"
+        name="rqt_image_view" args="$(arg output_topic)" />
+</launch>

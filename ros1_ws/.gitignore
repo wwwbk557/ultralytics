@@ -1,0 +1,8 @@
+build/
+devel/
+install/
+.catkin_workspace
+src/CMakeLists.txt
+!src/hk_pose_openvino/models/*.onnx
+!src/hk_pose_openvino/test_images/*.jpg
+!src/hk_pose_openvino/docs/*.jpg

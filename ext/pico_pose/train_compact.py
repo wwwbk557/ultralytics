@@ -14,7 +14,18 @@ os.chdir(ROOT)
 
 from ultralytics import YOLO
 
+from .rect_train import PicoRectTrainer
+
 CFG = Path(__file__).resolve().parent / "cfg" / "yolo11-pose-pico-compact.yaml"
+
+
+def _imgsz(value: str):
+    vals = [int(v) for v in str(value).replace("x", ",").split(",") if v.strip()]
+    if len(vals) == 1:
+        return vals[0]
+    if len(vals) == 2:
+        return tuple(vals)
+    raise argparse.ArgumentTypeError(f"imgsz must be one or two ints, got {value!r}")
 
 
 def _bool(value: str) -> bool:
@@ -48,7 +59,7 @@ def parse() -> argparse.Namespace:
     g = p.add_argument_group("schedule")
     g.add_argument("--epochs", type=int, default=250)
     g.add_argument("--batch", type=int, default=32)
-    g.add_argument("--imgsz", type=int, default=640)
+    g.add_argument("--imgsz", type=_imgsz, default="480,640", help="H,W, e.g. 480,640 or 640")
     g.add_argument("--optimizer", default="AdamW")
     g.add_argument("--lr0", type=float, default=5e-4)
     g.add_argument("--lrf", type=float, default=0.01)
@@ -80,19 +91,19 @@ def parse() -> argparse.Namespace:
     g.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
     g.add_argument("--max-det", type=int, default=300)
 
-    g = p.add_argument_group("augmentation")
-    g.add_argument("--hsv-h", type=float, default=0.0)
-    g.add_argument("--hsv-s", type=float, default=0.05)
-    g.add_argument("--hsv-v", type=float, default=0.5)
-    g.add_argument("--degrees", type=float, default=4.0)
+    g = p.add_argument_group("augmentation (rect mode keeps mosaic via RectMosaic)")
+    g.add_argument("--hsv-h", type=float, default=0.015)
+    g.add_argument("--hsv-s", type=float, default=0.7)
+    g.add_argument("--hsv-v", type=float, default=0.4)
+    g.add_argument("--degrees", type=float, default=5.0)
     g.add_argument("--translate", type=float, default=0.1)
-    g.add_argument("--scale", type=float, default=0.3)
+    g.add_argument("--scale", type=float, default=0.5)
     g.add_argument("--shear", type=float, default=0.0)
     g.add_argument("--perspective", type=float, default=0.0)
-    g.add_argument("--flipud", type=float, default=0.0)
-    g.add_argument("--fliplr", type=float, default=0.0)
+    g.add_argument("--flipud", type=float, default=0.0, help="keep 0: vertical flip mirrors armour digits")
+    g.add_argument("--fliplr", type=float, default=0.0, help="keep 0: horizontal flip mirrors armour digits")
     g.add_argument("--bgr", type=float, default=0.0)
-    g.add_argument("--mosaic", type=float, default=0.0)
+    g.add_argument("--mosaic", type=float, default=1.0)
     g.add_argument("--mixup", type=float, default=0.0)
     g.add_argument("--cutmix", type=float, default=0.0)
     g.add_argument("--copy-paste", type=float, default=0.0)
@@ -107,7 +118,8 @@ def parse() -> argparse.Namespace:
     g.add_argument("--kobj", type=float, default=1.0)
     g.add_argument("--color", type=float, default=0.1)
     g.add_argument("--number", type=float, default=0.1)
-    g.add_argument("--quality", type=float, default=0.05)
+    g.add_argument("--quality", type=float, default=0.05, help="objectness (channel 8) loss weight")
+    g.add_argument("--obj-pw-pow", type=float, default=0.5, help="exponent on objectness pos_weight; 1=balanced, 0.5 background-heavy")
     g.add_argument("--geom", type=float, default=0.0, help="geometry gain; 0 disables")
     g.add_argument("--geom-par", type=float, default=0.10)
     g.add_argument("--geom-opp", type=float, default=0.33)
@@ -131,7 +143,7 @@ def main() -> None:
     args["cache"] = _cache(a.cache)
     args["auto_augment"] = auto_augment
     args["resume"] = a.resume or False
-    model.train(**args)
+    model.train(trainer=PicoRectTrainer, **args)
 
 
 if __name__ == "__main__":
