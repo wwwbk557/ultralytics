@@ -53,6 +53,10 @@ class PicoPoseCompactAuxBox(Pose):
     deploy_filter = False
     deploy_boxes = False
     obj_logit_bias = 0.0
+    # Set by the export baker once the bias is folded into cv_compact.bias[8].
+    # Subtracting the runtime bias again would double-calibrate (mAP drops while
+    # the loss looks normal), so every calibration site asserts on this flag.
+    _obj_logit_calibrated = False
 
     def __init__(
         self,
@@ -182,6 +186,9 @@ class PicoPoseCompactAuxBox(Pose):
         if self.export:
             raw = x["raw18"]
             if self.obj_logit_bias:
+                assert not self._obj_logit_calibrated, (
+                    "objectness logits are already calibrated; refusing to subtract obj_logit_bias twice"
+                )
                 raw = raw.clone()
                 raw[:, self.nk] -= self.obj_logit_bias
             return raw.permute(0, 2, 1).contiguous()
@@ -196,6 +203,10 @@ class PicoPoseCompactAuxBox(Pose):
 
     def obj_prob(self, logits: torch.Tensor) -> torch.Tensor:
         """Objectness probability, optionally de-biased by ``obj_logit_bias``."""
+        assert not self._obj_logit_calibrated, (
+            "objectness logits are already calibrated (bias baked into the weights); "
+            "subtracting obj_logit_bias again would double-calibrate"
+        )
         return (logits - self.obj_logit_bias).sigmoid()
 
     @staticmethod

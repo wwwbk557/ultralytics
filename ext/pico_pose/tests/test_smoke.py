@@ -191,3 +191,57 @@ def test_deploy_boxes_and_obj_logit_bias():
         b = head(preds["feats"])
     assert torch.allclose(a[..., head.nk] - b[..., head.nk], torch.full_like(a[..., 0], 2.0), atol=1e-5)
     assert torch.allclose(a[..., : head.nk], b[..., : head.nk])
+
+
+def test_obj_logit_bias_bake_matches_runtime():
+    """sigmoid(z - log w) must equal sigmoid(z_baked): one calibration, two carriers."""
+    import math
+
+    model = _model()
+    head = model.model[-1]
+    model.eval()
+    head.export = True
+    head.obj_logit_bias = math.log(26.0)
+    x = [torch.randn(1, c, 480 // s, 640 // s) for c, s in zip((64, 128, 256), (8, 16, 32))]
+    with torch.no_grad():
+        runtime = head(x)
+    for conv in head.cv_compact:  # fold the same offset into the weights
+        conv.bias.data[head.nk] -= head.obj_logit_bias
+    head.obj_logit_bias = 0.0
+    with torch.no_grad():
+        baked = head(x)
+    assert torch.allclose(runtime, baked, atol=1e-5)
+
+
+def test_obj_logit_calibrated_flag_blocks_double_calibration():
+    model = _model()
+    head = model.model[-1]
+    model.eval()
+    head.export = True
+    head.obj_logit_bias = 1.0
+    head._obj_logit_calibrated = True
+    with pytest.raises(AssertionError):
+        head.obj_prob(torch.zeros(1, 1, 4))
+    with pytest.raises(AssertionError):
+        head([torch.zeros(1, c, 4, 4) for c in (64, 128, 256)])
+
+
+def test_quality_loss_survives_all_negative_batch():
+    """extra[2] moved out of `if fg_mask.any()`: background-only batches still train ch8."""
+    model = _model()
+    model.args = SimpleNamespace(
+        box=7.5, cls=0.5, dfl=1.5, pose=12.0, kobj=1.0,
+        color=0.1, number=0.1, quality=0.05, geom=0.0, obj_pw_pow=0.5, quality_soft=0.0,
+    )
+    model.train()
+    preds = model(torch.randn(1, 3, 480, 640))
+    criterion = model.init_criterion()
+    empty = {
+        "batch_idx": torch.zeros(0, dtype=torch.long),
+        "cls": torch.zeros(0, 1),
+        "bboxes": torch.zeros(0, 4),
+        "keypoints": torch.zeros(0, NKPT, NDIM),
+    }
+    loss, items = criterion(preds, empty)
+    assert torch.isfinite(loss).all()
+    assert float(items[7]) > 0.0

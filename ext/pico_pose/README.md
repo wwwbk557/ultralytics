@@ -83,8 +83,11 @@ objectness 的 BCE 用 `pos_weight = (n_neg / n_pos) ** obj_pw_pow`（mean reduc
 - `--obj-logit-bias auto`：训练时 `pos_weight ≈ 26`，`sigmoid(logit)` 不是概率
   （0.5 只对应真实前景 3.7%）。auto 用训练集先验算出 `log(pos_weight)` 并写进 head；
   验证时算 `sigmoid(z - bias)`，导出时**直接减在通道 8 的 logit 上**，端侧 sigmoid 不变。
-- 导出：`python scripts/export_pico.py --weights best.pt --format onnx`，会把 ckpt 里的
-  `obj_logit_bias` 烘进 ONNX。
+- 导出：`python scripts/export_pico.py --weights best.pt --format onnx`，会在
+  `deepcopy(state_dict())` 上把 bias 加进 `cv_compact.bias[8]`，导出完恢复，ckpt 不动。
+- **一次性校准护栏**：校准是 logit 空间的可加偏移，同一个 z 只能校准一次。head 上的
+  `_obj_logit_calibrated` 在权重烘好后置位，`obj_prob()` / 导出分支 / `PicoCompactPoseLoss`
+  三处都会断言它未置位——否则就是双重校准（症状：mAP 掉、loss 正常、阈值全偏）。
 
 ## 导出
 

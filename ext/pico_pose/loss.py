@@ -71,6 +71,11 @@ class PicoCompactPoseLoss(v8PoseLoss):
 
     def __init__(self, model):
         super().__init__(model)
+        # A calibrated head has obj_logit_bias folded into channel 8, so its raw
+        # logit is no longer the quantity the BCE target is defined against.
+        assert not getattr(model.model[-1], "_obj_logit_calibrated", False), (
+            "refusing to train against a calibrated objectness head (bias already baked into the weights)"
+        )
         self.color_map = torch.tensor(COLOR_BY_CLASS, device=self.device, dtype=torch.long)
         self.number_map = torch.tensor(ROLE_BY_CLASS, device=self.device, dtype=torch.long)
 
@@ -216,6 +221,34 @@ class PicoCompactPoseLoss(v8PoseLoss):
 
         n_pos = fg_mask.sum().clamp_min(1)
         extra = torch.zeros(4, device=self.device, dtype=torch.float32)
+
+        # Channel 8 is objectness, not a quality regression: 1 on TAL positives,
+        # 0 on every other anchor. It is used as a gate at inference, so it must
+        # learn background suppression rather than localisation quality.
+        #
+        # pos_weight = (n_neg / n_pos) ** obj_pw_pow. With mean reduction an
+        # exponent of 1 is class-balanced, so every anchor with a true
+        # posterior above ~1/w is pushed above 0.5 (background near objects
+        # included). The default 0.5 keeps positives high while letting
+        # negatives dominate the total, which is what suppresses background.
+        #
+        # This term is deliberately outside the `fg_mask.any()` block: an
+        # all-negative batch (no GT, or no assigned anchor) is the cleanest
+        # background signal and must still push objectness down everywhere.
+        q_logits = preds["quality"].permute(0, 2, 1).reshape(-1).float()
+        q_target_all = torch.zeros_like(q_logits)
+        if fg_mask.any():
+            q_target_all[fg_mask.reshape(-1)] = 1.0
+            if q_iou is not None:
+                # (1 - s) + s * IoU keeps every positive well above the negatives
+                # while ordering them by the IoU the deployment NMS will see.
+                q_target_all[fg_mask.reshape(-1)] = (1.0 - q_soft) + q_soft * q_iou
+        pw_pow = float(getattr(self.hyp, "obj_pw_pow", 0.5))
+        q_pos_weight = ((q_logits.numel() - n_pos) / n_pos).clamp(1.0, 10000.0).pow(pw_pow)
+        extra[2] = F.binary_cross_entropy_with_logits(
+            q_logits, q_target_all, reduction="mean", pos_weight=q_pos_weight
+        )
+
         if fg_mask.any():
             for b in range(bs):
                 m = fg_mask[b]
@@ -236,28 +269,6 @@ class PicoCompactPoseLoss(v8PoseLoss):
                     mon["agree_n"] += m.sum()
 
             pred_px = pred_kpts * stride_tensor.view(1, -1, 1, 1)
-
-            # Channel 8 is objectness, not a quality regression: 1 on TAL positives,
-            # 0 on every other anchor. It is used as a gate at inference, so it must
-            # learn background suppression rather than localisation quality.
-            #
-            # pos_weight = (n_neg / n_pos) ** obj_pw_pow. With mean reduction an
-            # exponent of 1 is class-balanced, so every anchor with a true
-            # posterior above ~1/w is pushed above 0.5 (background near objects
-            # included). The default 0.5 keeps positives high while letting
-            # negatives dominate the total, which is what suppresses background.
-            q_logits = preds["quality"].permute(0, 2, 1).reshape(-1).float()
-            q_target_all = torch.zeros_like(q_logits)
-            q_target_all[fg_mask.reshape(-1)] = 1.0
-            if q_iou is not None:
-                # (1 - s) + s * IoU keeps every positive well above the negatives
-                # while ordering them by the IoU the deployment NMS will see.
-                q_target_all[fg_mask.reshape(-1)] = (1.0 - q_soft) + q_soft * q_iou
-            pw_pow = float(getattr(self.hyp, "obj_pw_pow", 0.5))
-            q_pos_weight = ((q_logits.numel() - n_pos) / n_pos).clamp(1.0, 10000.0).pow(pw_pow)
-            extra[2] = F.binary_cross_entropy_with_logits(
-                q_logits, q_target_all, reduction="mean", pos_weight=q_pos_weight
-            )
 
             geom_gain = float(getattr(self.hyp, "geom", 0.0))
             if geom_gain > 0:
