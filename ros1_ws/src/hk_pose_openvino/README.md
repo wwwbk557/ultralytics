@@ -114,7 +114,7 @@ rosbag play "/home/wbk/bags/catkin_ws/英雄小陀螺4到3m先快后慢.bag" \
 | `image_topic` | `/hk_camera_cs/image_raw` | 输入 |
 | `output_topic` | `/hk_pose_openvino/image_result` | 输出 |
 | `image_transport` | `raw` | 输入传输方式 |
-| `conf_threshold` | `0.20` | 1027 的 `quality * max_class` 阈值；0526 用 `0.50`（sigmoid 后置信度） |
+| `conf_threshold` | `0.90` | 1027 的 `quality * max_class` 阈值；0526 用 `0.50`（sigmoid 后置信度） |
 | `quality_threshold` | `0.05` | 1027 的 quality 预筛；0526 不使用 |
 | `nms_threshold` | `0.45` | NMS 的 IoU（1027 按类，0526 全局） |
 | `my_color` | `-1` | 仅 0526：-1 保留全部，0=蓝，1=红（过滤敌方颜色） |

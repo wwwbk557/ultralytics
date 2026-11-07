@@ -71,7 +71,7 @@ struct OpenVinoDetector::Impl {
 
   std::string model_path;
   std::string device = "CPU";
-  float conf_threshold = 0.20f;
+  float conf_threshold = 0.90f;
   float quality_threshold = 0.05f;
   float nms_threshold = 0.45f;
   int num_threads = 0;

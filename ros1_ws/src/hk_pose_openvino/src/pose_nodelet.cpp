@@ -53,10 +53,10 @@ void PoseNodelet::onInit() {
   pnh.param("input_width", options.input_width, 640);
   pnh.param("input_height", options.input_height, 480);
 
-  double conf_threshold = 0.20;
+  double conf_threshold = 0.90;
   double quality_threshold = 0.05;
   double nms_threshold = 0.45;
-  pnh.param("conf_threshold", conf_threshold, 0.20);
+  pnh.param("conf_threshold", conf_threshold, 0.90);
   pnh.param("quality_threshold", quality_threshold, 0.05);
   pnh.param("nms_threshold", nms_threshold, 0.45);
   options.conf_threshold =

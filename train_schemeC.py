@@ -121,7 +121,8 @@ def parse() -> argparse.Namespace:
     g.add_argument("--cutmix", type=float, default=0.0)
     g.add_argument("--copy-paste", type=float, default=0.0, help="no-op without segment labels")
     g.add_argument("--auto-augment", default="none", help="classification-only upstream; ignored for pose")
-    g.add_argument("--erasing", type=float, default=0.4)
+    g.add_argument("--erasing", type=float, default=0.0,
+                   help="classification-only in ultralytics (RandomErasing is never applied to pose/detect)")
 
     g = p.add_argument_group("loss")
     g.add_argument("--box", type=float, default=7.5)
@@ -266,8 +267,9 @@ def main() -> None:
     print(f"[train_schemeC] init_weights={init_weights or 'FROM SCRATCH'}")
     print(f"[train_schemeC] quality_soft={a.quality_soft} obj_logit_bias={a.obj_logit_bias:+.3f} "
           f"(channel8: sigmoid(z - bias)) deploy_boxes={a.deploy_boxes}")
-    aug_keys = ("hsv_h", "hsv_s", "hsv_v", "degrees", "translate", "scale", "fliplr", "mosaic", "mixup", "cutmix", "erasing")
-    print("[train_schemeC] aug=" + " ".join(f"{k}={args[k]}" for k in aug_keys))
+    aug_keys = ("hsv_h", "hsv_s", "hsv_v", "degrees", "translate", "scale", "fliplr", "mosaic", "mixup", "cutmix")
+    print("[train_schemeC] aug=" + " ".join(f"{k}={args[k]}" for k in aug_keys)
+          + "  (erasing is classification-only and not applied to pose)")
     model.train(trainer=trainer, **args)
 
 

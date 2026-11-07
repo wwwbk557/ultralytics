@@ -32,7 +32,7 @@ struct DetectorOptions {
   const char* device = "CPU";
   int input_width = 640;   ///< only used when the ONNX input shape is dynamic
   int input_height = 480;  ///< only used when the ONNX input shape is dynamic
-  float conf_threshold = 0.20f;
+  float conf_threshold = 0.90f;
   float quality_threshold = 0.05f;
   float nms_threshold = 0.45f;
   int num_threads = 0;  ///< 0 -> OpenVINO default
