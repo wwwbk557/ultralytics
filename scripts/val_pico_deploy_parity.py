@@ -107,6 +107,8 @@ def parse():
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--mode", choices=sorted(MODES), default="box")
     p.add_argument("--obj-thresh", type=float, default=None, help="emulate the deploy quality gate")
+    p.add_argument("--obj-bias", type=float, default=None, help="objectness logit offset (log pos_weight)")
+    p.add_argument("--builtin", action="store_true", help="use the head's own deploy_boxes path (applies obj_logit_bias)")
     p.add_argument("--iou", type=float, default=0.7, help="NMS IoU (deploy node defaults to 0.45)")
     p.add_argument("--conf", type=float, default=0.001, help="pre-NMS conf used by the validator")
     p.add_argument("--json", action="store_true", help="print one json line instead of a table")
@@ -131,10 +133,15 @@ def main() -> None:
     ckpt = torch.load(args.weights, map_location="cpu", weights_only=False)
     model = YOLO(args.weights).model.eval()
     head = model.model[-1]
-    head._inference = MethodType(MODES[args.mode], head)
+    if args.builtin:
+        head.deploy_boxes = True   # head._inference -> _corner_bboxes + obj_prob(bias)
+    else:
+        head._inference = MethodType(MODES[args.mode], head)
     if args.obj_thresh is not None:
         head.obj_threshold = float(args.obj_thresh)
         head.deploy_filter = True
+    if args.obj_bias is not None:
+        head.obj_logit_bias = float(args.obj_bias)
 
     vargs = get_cfg(
         overrides=dict(
