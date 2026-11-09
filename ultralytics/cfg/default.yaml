@@ -107,6 +107,7 @@ kobj: 1.0 # (float) keypoint objectness loss gain (pose tasks)
 color: 0.1 # (float) compact colour classification loss gain
 number: 0.1 # (float) compact number classification loss gain
 quality: 0.05 # (float) compact objectness (channel 8) loss gain
+consistency: 0.0 # (float) exposure/blur consistency KL gain on the exported colour/role heads (train only)
 obj_pw_pow: 0.5 # (float) exponent on objectness pos_weight (1.0 = balanced, <1 favours background)
 quality_soft: 0.0 # (float) blend IoU into the objectness target (0 = hard 1/0 foreground flag)
 obj_logit_bias: 0.0 # (float) subtract from the objectness logit (log(pos_weight)) so sigmoid is calibrated
@@ -116,6 +117,13 @@ geom_par: 0.10 # (float) parallelogram residual weight
 geom_opp: 0.33 # (float) opposite-edge residual weight
 geom_angle: 0.23 # (float) right-angle residual weight
 geom_axis: 0.44 # (float) horizontal-edge residual weight
+photometric_p: 0.0 # (float) probability of the target-mean exposure/motion-blur block (train only)
+photometric_target: [5.0, 60.0] # (list) target mean brightness range in 8-bit gray levels
+photometric_blur_p: 0.3 # (float) motion-blur probability inside the photometric block
+photometric_noise_p: 0.2 # (float) Gaussian-noise probability inside the photometric block
+role_label_smoothing: 0.0 # (float) label smoothing for the compact colour/number heads
+role_mask_area: [20.0, 80.0] # (list) soft role-loss mask: armour area ramp, px^2
+role_mask_ratio: [0.10, 0.20] # (list) soft role-loss mask: short/long edge ratio ramp
 rle: 1.0 # (float) rle loss gain (pose tasks)
 angle: 1.0 # (float) oriented angle loss gain (obb tasks)
 nbs: 64 # (int) nominal batch size used for loss normalization

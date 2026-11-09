@@ -29,6 +29,7 @@ from ultralytics.nn.autobackend import AutoBackend
 from ultralytics.utils import LOGGER
 from ultralytics.utils.torch_utils import unwrap_model
 
+from .photometric import install_photometric
 from .rect_augment import install_rect_mosaic
 
 import ultralytics.engine.trainer as _trainer_mod
@@ -136,6 +137,20 @@ class PicoRectTrainer(PoseTrainer):
         if mode == "train" and float(getattr(self.args, "mosaic", 0) or 0) > 0:
             n = install_rect_mosaic(dataset, self.args.imgsz)
             LOGGER.info(f"rectangular training: installed {n} RectMosaic for imgsz={tuple(int(x) for x in self.args.imgsz)}")
+        if mode == "train":
+            p = float(getattr(self.args, "photometric_p", 0.0) or 0.0)
+            if p > 0:
+                n = install_photometric(
+                    dataset,
+                    p=p,
+                    target=getattr(self.args, "photometric_target", (5.0, 60.0)),
+                    blur_p=float(getattr(self.args, "photometric_blur_p", 0.3) or 0.0),
+                    noise_p=float(getattr(self.args, "photometric_noise_p", 0.2) or 0.0),
+                )
+                LOGGER.info(
+                    f"photometric augmentation: installed {n} transform(s), "
+                    f"p={p:.2f} target={getattr(self.args, 'photometric_target', (5.0, 60.0))}"
+                )
         return dataset
 
     def setup_model(self):
@@ -146,6 +161,12 @@ class PicoRectTrainer(PoseTrainer):
         """
         ckpt = super().setup_model()
         self._apply_pico_eval_flags(self.model)
+        # A checkpoint may carry the old criterion with the old 4-slot loss and
+        # the old args namespace.  Drop it so the first loss call rebuilds it
+        # against self.args (new colour/number/consistency weights included).
+        inner = unwrap_model(self.model)
+        if getattr(inner, "criterion", None) is not None:
+            inner.criterion = None
         return ckpt
 
     def _apply_pico_eval_flags(self, model) -> None:
@@ -156,6 +177,9 @@ class PicoRectTrainer(PoseTrainer):
             return
         head.deploy_boxes = bool(getattr(self.args, "deploy_boxes", False))
         head.obj_logit_bias = float(getattr(self.args, "obj_logit_bias", 0.0))
+        # The checkpoint pickles the old 4-tuple; the loss now returns 5 extra
+        # slots, and PoseTrainer.get_validator builds the CSV header from this.
+        head.extra_loss_names = ("color_loss", "number_loss", "quality_loss", "geom_loss", "consistency_loss")
         LOGGER.info(
             f"pico eval parity: deploy_boxes={head.deploy_boxes} "
             f"obj_logit_bias={head.obj_logit_bias:+.3f} (sigmoid(z - bias) on channel 8)"

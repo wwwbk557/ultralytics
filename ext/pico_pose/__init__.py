@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-__all__ = ("PicoPoseCompactAuxBox", "PicoCompactPoseLoss", "pose_geometry_loss")
+__all__ = ("PicoPoseCompactAuxBox", "PicoCompactPoseLoss", "pose_geometry_loss", "role_mask_weight")
 
 _HEAD_SYMBOLS = {"PicoPoseCompactAuxBox"}
-_LOSS_SYMBOLS = {"PicoCompactPoseLoss", "pose_geometry_loss"}
+_LOSS_SYMBOLS = {"PicoCompactPoseLoss", "pose_geometry_loss", "role_mask_weight"}
 
 
 def __getattr__(name: str):

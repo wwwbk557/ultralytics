@@ -44,6 +44,17 @@ def _imgsz(value: str):
     raise argparse.ArgumentTypeError(f"imgsz must be one or two ints, got {value!r}")
 
 
+def _pair_float(value: str, name: str) -> tuple[float, ...]:
+    """Parse ``"lo,hi"`` into a float tuple; an empty string disables the option."""
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null", "off"}:
+        return ()
+    vals = tuple(float(v) for v in text.replace("x", ",").split(",") if v.strip())
+    if len(vals) != 2:
+        raise argparse.ArgumentTypeError(f"{name} must be 'lo,hi', got {value!r}")
+    return vals
+
+
 def parse() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -123,6 +134,14 @@ def parse() -> argparse.Namespace:
     g.add_argument("--auto-augment", default="none", help="classification-only upstream; ignored for pose")
     g.add_argument("--erasing", type=float, default=0.0,
                    help="classification-only in ultralytics (RandomErasing is never applied to pose/detect)")
+    g.add_argument("--photometric-p", type=float, default=0.0,
+                   help="probability of the target-mean exposure/blur/noise block (train only; 0 disables)")
+    g.add_argument("--photometric-target", default="5,60",
+                   help="min,max target mean brightness for the gamma LUT, 8-bit gray levels")
+    g.add_argument("--photometric-blur-p", type=float, default=0.3,
+                   help="motion-blur probability inside the photometric block")
+    g.add_argument("--photometric-noise-p", type=float, default=0.2,
+                   help="Gaussian-noise probability inside the photometric block")
 
     g = p.add_argument_group("loss")
     g.add_argument("--box", type=float, default=7.5)
@@ -133,6 +152,8 @@ def parse() -> argparse.Namespace:
     g.add_argument("--color", type=float, default=0.1)
     g.add_argument("--number", type=float, default=0.1, help="role loss weight")
     g.add_argument("--quality", type=float, default=0.05, help="objectness (channel 8) loss weight")
+    g.add_argument("--consistency", type=float, default=0.0,
+                   help="exposure/blur consistency KL gain on colour/role (train only; 0 disables)")
     g.add_argument("--obj-pw-pow", type=float, default=0.5, help="exponent on objectness pos_weight; 1=balanced, 0.5 background-heavy")
     g.add_argument("--quality-soft", type=float, default=0.0,
                    help="blend the deployment NMS IoU into the objectness target: tgt=(1-s)+s*IoU; 0 = hard 1/0")
@@ -146,6 +167,12 @@ def parse() -> argparse.Namespace:
     g.add_argument("--geom-opp", type=float, default=0.33)
     g.add_argument("--geom-angle", type=float, default=0.23)
     g.add_argument("--geom-axis", type=float, default=0.44)
+    g.add_argument("--role-label-smoothing", type=float, default=0.0,
+                   help="label smoothing for the compact colour/number cross-entropy")
+    g.add_argument("--role-mask-area", default="20,80",
+                   help="soft role-loss mask: armour area ramp in px^2, lo,hi (empty = disabled)")
+    g.add_argument("--role-mask-ratio", default="0.10,0.20",
+                   help="soft role-loss mask: short/long edge ratio ramp, lo,hi (empty = disabled)")
     return p.parse_args()
 
 
@@ -246,6 +273,9 @@ def main() -> None:
     if not data.is_file():
         raise SystemExit(f"data yaml not found: {data}")
     a.obj_logit_bias = _resolve_obj_logit_bias(a.obj_logit_bias, data, a.imgsz, a.obj_pw_pow)
+    a.photometric_target = _pair_float(a.photometric_target, "photometric-target")
+    a.role_mask_area = _pair_float(a.role_mask_area, "role-mask-area")
+    a.role_mask_ratio = _pair_float(a.role_mask_ratio, "role-mask-ratio")
     cache = False if str(a.cache).lower() == "false" else a.cache
     auto_augment = None if str(a.auto_augment).lower() in {"none", "null", ""} else a.auto_augment
 
@@ -267,9 +297,12 @@ def main() -> None:
     print(f"[train_schemeC] init_weights={init_weights or 'FROM SCRATCH'}")
     print(f"[train_schemeC] quality_soft={a.quality_soft} obj_logit_bias={a.obj_logit_bias:+.3f} "
           f"(channel8: sigmoid(z - bias)) deploy_boxes={a.deploy_boxes}")
-    aug_keys = ("hsv_h", "hsv_s", "hsv_v", "degrees", "translate", "scale", "fliplr", "mosaic", "mixup", "cutmix")
+    aug_keys = ("hsv_h", "hsv_s", "hsv_v", "degrees", "translate", "scale", "fliplr", "mosaic", "mixup", "cutmix",
+                "photometric_p", "photometric_target", "photometric_blur_p", "photometric_noise_p")
     print("[train_schemeC] aug=" + " ".join(f"{k}={args[k]}" for k in aug_keys)
           + "  (erasing is classification-only and not applied to pose)")
+    print(f"[train_schemeC] role: label_smoothing={a.role_label_smoothing} "
+          f"mask_area={a.role_mask_area} mask_ratio={a.role_mask_ratio}")
     model.train(trainer=trainer, **args)
 
 

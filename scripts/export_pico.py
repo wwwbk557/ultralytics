@@ -58,6 +58,56 @@ def resolve_bias(args, weights: Path) -> float:
         return 0.0
 
 
+
+def _toposort_onnx(path) -> None:
+    """ONNX's CPU FP16 converter can leave Cast nodes out of topological order.
+
+    ORT is forgiving but onnx.checker / OpenVINO / TensorRT are not.  Reorder the
+    graph in place after the export, then re-run the checker.
+    """
+    try:
+        import onnx
+    except Exception:
+        return
+    path = Path(path)
+    if path.suffix != ".onnx" or not path.is_file():
+        return
+    model = onnx.load(path)
+    try:
+        onnx.checker.check_model(model)
+        return
+    except Exception:
+        pass
+    nodes = list(model.graph.node)
+    producer = {o: i for i, n in enumerate(nodes) for o in n.output}
+    n = len(nodes)
+    adj = [[] for _ in range(n)]
+    indeg = [0] * n
+    for i, node in enumerate(nodes):
+        for x in node.input:
+            j = producer.get(x)
+            if j is not None and j != i:
+                adj[j].append(i)
+                indeg[i] += 1
+    q = [i for i in range(n) if indeg[i] == 0]
+    order = []
+    while q:
+        i = q.pop(0)
+        order.append(i)
+        for j in adj[i]:
+            indeg[j] -= 1
+            if indeg[j] == 0:
+                q.append(j)
+    if len(order) != n:
+        print("[export_pico] WARNING: ONNX graph has a cycle; not reordering")
+        return
+    model.graph.node.clear()
+    model.graph.node.extend(nodes[i] for i in order)
+    onnx.checker.check_model(model)
+    onnx.save(model, path)
+    print(f"[export_pico] ONNX graph topologically sorted: {path}")
+
+
 def main() -> None:
     a = parse()
     weights = Path(a.weights)
@@ -74,6 +124,8 @@ def main() -> None:
         head.obj_logit_bias = 0.0
         print("[export_pico] obj_logit_bias=0, exporting without calibration")
         path = model.export(format=a.format, imgsz=(h, w), half=a.half, simplify=a.simplify, opset=a.opset)
+        if a.format == "onnx":
+            _toposort_onnx(path)
         print(f"[export_pico] -> {path}")
         return
 
@@ -87,6 +139,8 @@ def main() -> None:
         f"(one-shot: sigmoid(z - bias) == sigmoid(z_baked), checkpoint untouched)"
     )
     path = model.export(format=a.format, imgsz=(h, w), half=a.half, simplify=a.simplify, opset=a.opset)
+    if a.format == "onnx":
+        _toposort_onnx(path)
     print(f"[export_pico] -> {path}")
 
 

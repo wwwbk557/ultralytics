@@ -120,10 +120,11 @@ def test_loss_vector_and_geometry_switch():
     criterion = model.init_criterion()
     assert criterion.__class__.__name__ == "PicoCompactPoseLoss"
     loss, items = criterion(preds, _batch())
-    assert items.shape == (9,)
+    assert items.shape == (10,)
     assert torch.isfinite(loss).all()
     assert float(items[0]) > 0 and float(items[4]) > 0
     assert float(items[8]) == 0.0
+    assert float(items[9]) == 0.0  # consistency disabled by default
 
     model.args.geom = 1.0
     _, items_on = criterion(preds, _batch())

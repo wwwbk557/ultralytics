@@ -105,7 +105,7 @@ class PicoPoseCompactAuxBox(Pose):
         # log(pos_weight) used during training. It is subtracted from the exported
         # channel-8 logit so the deployment sigmoid is calibrated too.
         self.obj_logit_bias = float(kwargs.pop("obj_logit_bias", 0.0))
-        self.extra_loss_names = ("color_loss", "number_loss", "quality_loss", "geom_loss")
+        self.extra_loss_names = ("color_loss", "number_loss", "quality_loss", "geom_loss", "consistency_loss")
         self.cv3 = None
         self.cv4 = None
         self._end2end = False

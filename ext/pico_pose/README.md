@@ -41,13 +41,77 @@ python -m ext.pico_pose.train_compact \
 - 因为上游 Mosaic 只支持方形，矩形训练改用 `RectMosaic`（2H×2W 画布，affine 直接裁到 H×W），`mosaic/mixup/cutmix` 仍然可用；`copy_paste` 需要分割标签，姿态数据集上是 no-op；
 - 不加 `--weights` 就是从头训练。
 
+## 曝光/运动增广与 role mask（v2 微调用）
+
+部署相机比训练集主体暗得多（帧均值 5~10 vs 30~45），role 头会把“暗、没有亮数字”的板子
+判成 outpost。`RandomPhotometric` 在 train split 上按**目标均值**采样 gamma：
+
+```text
+target_mean ~ U(5, 60)
+gamma = log(target_mean/255) / log(mean/255)
+```
+
+每张图独立采样，所以每个类都会同时出现在暗和亮的样本里，切断“亮度/类别”的相关性；再叠加
+motion blur 和 Gaussian noise。它插在 mosaic/affine/flip 之后、`Format` 之前，输入仍是
+uint8 HWC，只加训练算力，导出图不变。
+
+```bash
+--photometric-p 0.6 --photometric-target 5,60 \
+--photometric-blur-p 0.3 --photometric-noise-p 0.2
+```
+
+`--consistency 0.1` 再加一条 **clean → 暗光/模糊 view 的 role/colour KL**：clean 视图做
+teacher（detach），photometric 视图做 student，只走 `cv_shared + cv_compact`（临时
+`aux_box=False`，不跑 `cv2`/`cv_joint`）。它让导出的 colour/role 头在暗光/模糊输入下保持
+同一个后验。训练算力约 ×2，val 不跑（`val/consistency_loss` 为 0）；`train/consistency_loss`
+进 CSV。模型引用用 module 级 `_MODEL_REFS`（criterion id → weakref）记录，避免 criterion 作为
+model 子模块时形成引用环或让 checkpoint 不可 pickle；从旧 checkpoint 微调时
+`PicoRectTrainer.setup_model` 会丢掉 checkpoint 里的旧 criterion，保证新的
+`color/number/consistency` 权重生效。
+
+`--role-mask-area 20,80` / `--role-mask-ratio 0.10,0.20` 用 GT 四角点的面积和短/长边比给
+colour/role CE 一个软权重：太小或太侧视的板子只训 box/pose/objectness，不逼分类器猜。
+`mon/role_mask` 是正样本上的平均权重（1 = 完全没 mask）。`--role-label-smoothing 0.05`
+给 colour/role CE 加 label smoothing（不要用上游已删除的 `label_smoothing` 键）。
+
+微调时先裁 val，避免 outpost 主导 `best.pt`：
+
+```bash
+python scripts/cap_schemeC_val.py \
+  --src datasets/schemeC_split_bal \
+  --out datasets/schemeC_split_bal_capval \
+  --max-per-group 120
+```
+
+它保留全部 train，只对每个 val capture group 最多保留 120 张，丢掉的帧不会进 train，
+所以 group 级 train/val 隔离不变。
+
+从 v2 checkpoint 微调（**不要 `--resume`**，`--resume` 会恢复旧 schedule/args）：
+
+```bash
+python train_schemeC.py \
+  --weights runs/pose/runs/pose/schemeC_480x640_v2/weights/best.pt \
+  --data datasets/schemeC_split_bal_capval/data.yaml \
+  --epochs 40 --batch 16 --imgsz 480,640 --device 0 --workers 8 \
+  --lr0 1e-4 --lrf 0.05 --warmup-epochs 2 --close-mosaic 10 \
+  --quality-soft 0.4 --obj-logit-bias 3.2519750258814093 \
+  --photometric-p 0.6 --photometric-target 5,60 \
+  --photometric-blur-p 0.3 --photometric-noise-p 0.2 \
+  --consistency 0.1 --color 0.2 --number 0.3 \
+  --role-label-smoothing 0.05 \
+  --role-mask-area 20,80 --role-mask-ratio 0.1,0.2 \
+  --name schemeC_v2_ft_aug
+```
+
 ## 损失槽位
 
 ```text
-[box, pose, kobj, cls, dfl, color, role, quality, geom]
+[box, pose, kobj, cls, dfl, color, role, quality, geom, consistency]
 ```
 
 CSV 里的 `number_loss` 是 role 分类损失（历史列名，导出通道 11:18 也叫 number）。
+最后一个 `consistency` 是训练期 clean/photometric 视图的 KL（`--consistency`，val 为 0），
+不是导出通道的一部分。
 
 第 8 个槽位 `quality` 现在训练成 **objectness**：TAL 匹配到的正样本目标为 1，
 其余 anchor 为 0（以前是 OKS 回归目标）。`colour`/`role` 只在正样本上做交叉熵，
@@ -83,8 +147,10 @@ objectness 的 BCE 用 `pos_weight = (n_neg / n_pos) ** obj_pw_pow`（mean reduc
 - `--obj-logit-bias auto`：训练时 `pos_weight ≈ 26`，`sigmoid(logit)` 不是概率
   （0.5 只对应真实前景 3.7%）。auto 用训练集先验算出 `log(pos_weight)` 并写进 head；
   验证时算 `sigmoid(z - bias)`，导出时**直接减在通道 8 的 logit 上**，端侧 sigmoid 不变。
-- 导出：`python scripts/export_pico.py --weights best.pt --format onnx`，会在
-  `deepcopy(state_dict())` 上把 bias 加进 `cv_compact.bias[8]`，导出完恢复，ckpt 不动。
+- 导出：`python scripts/export_pico.py --weights best.pt --format onnx` 从 checkpoint 的
+  `train_args.obj_logit_bias` 读取偏置，设置 `head.obj_logit_bias` 并保持
+  `_obj_logit_calibrated=False`，由导出分支在通道 8 上减一次，ONNX 里是一个 Sub 节点；
+  checkpoint 不动。`--obj-logit-bias 0` 可显式关闭从 v2 checkpoint 继承的偏置。
 - **一次性校准护栏**：校准是 logit 空间的可加偏移，同一个 z 只能校准一次。head 上的
   `_obj_logit_calibrated` 在权重烘好后置位，`obj_prob()` / 导出分支 / `PicoCompactPoseLoss`
   三处都会断言它未置位——否则就是双重校准（症状：mAP 掉、loss 正常、阈值全偏）。
