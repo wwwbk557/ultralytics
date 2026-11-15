@@ -121,6 +121,18 @@ photometric_p: 0.0 # (float) probability of the target-mean exposure/motion-blur
 photometric_target: [5.0, 60.0] # (list) target mean brightness range in 8-bit gray levels
 photometric_blur_p: 0.3 # (float) motion-blur probability inside the photometric block
 photometric_noise_p: 0.2 # (float) Gaussian-noise probability inside the photometric block
+env_p: 0.0 # (float) probability of the plate/surroundings decorrelation block (train only)
+env_relocate_p: 0.35 # (float) per-plate probability of cutting the plate out and pasting it elsewhere
+env_context_p: 0.5 # (float) per-plate probability of replacing the neighbourhood around the plate
+env_solo_p: 0.25 # (float) per-image probability of keeping one plate and erasing its siblings
+env_scene_p: 0.35 # (float) per-image probability of replacing the background outside the plates
+env_flat_p: 0.4 # (float) within a scene swap, probability of a synthetic background vs a donor scene
+env_donors: 32 # (int) number of plate-free training crops used as donor scenes
+env_context_scale: [1.6, 2.6] # (list) neighbourhood size range as a multiple of the plate's larger side
+plate_scale_p: 0.0 # (float) probability of resizing plates on the final canvas (target-level scale jitter; train only)
+plate_scale_range: [0.85, 1.15] # (list) uniform resize factor range applied to the picked plate
+plate_scale_max: 2 # (int) max plates resized per image
+plate_scale_min_px: 16.0 # (float) plates smaller than this kp-AABB long side are only kept or enlarged
 role_label_smoothing: 0.0 # (float) label smoothing for the compact colour/number heads
 role_mask_area: [20.0, 80.0] # (list) soft role-loss mask: armour area ramp, px^2
 role_mask_ratio: [0.10, 0.20] # (list) soft role-loss mask: short/long edge ratio ramp

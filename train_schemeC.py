@@ -119,7 +119,8 @@ def parse() -> argparse.Namespace:
     g.add_argument("--hsv-h", type=float, default=0.015, help="hue gain; keep small for red/blue armour")
     g.add_argument("--hsv-s", type=float, default=0.7)
     g.add_argument("--hsv-v", type=float, default=0.4)
-    g.add_argument("--degrees", type=float, default=5.0)
+    g.add_argument("--degrees", type=float, default=5.0,
+                   help="in-plane rotation, uniform +/-degrees (camera roll); also enables keypoint box sync")
     g.add_argument("--translate", type=float, default=0.1)
     g.add_argument("--scale", type=float, default=0.5)
     g.add_argument("--shear", type=float, default=0.0)
@@ -142,6 +143,34 @@ def parse() -> argparse.Namespace:
                    help="motion-blur probability inside the photometric block")
     g.add_argument("--photometric-noise-p", type=float, default=0.2,
                    help="Gaussian-noise probability inside the photometric block")
+
+    g = p.add_argument_group("target scale jitter (train only)")
+    g.add_argument("--plate-scale-p", type=float, default=0.0,
+                   help="per-image probability of resizing one or more plates; 0 disables")
+    g.add_argument("--plate-scale-range", default="0.85,1.15",
+                   help="uniform factor range applied to the picked plate ('lo,hi'; 1.0 = keep size)")
+    g.add_argument("--plate-scale-max", type=int, default=2,
+                   help="max plates resized per image")
+    g.add_argument("--plate-scale-min-px", type=float, default=16.0,
+                   help="plates with a kp-AABB long side below this many canvas px are never shrunk")
+
+    g = p.add_argument_group("environment decorrelation (P0; train only)")
+    g.add_argument("--env-p", type=float, default=0.0,
+                   help="probability of applying the environment-decorrelation block to one image; 0 disables")
+    g.add_argument("--env-relocate-p", type=float, default=0.35,
+                   help="per-plate probability of cutting the plate out and pasting it elsewhere")
+    g.add_argument("--env-context-p", type=float, default=0.5,
+                   help="per-plate probability of replacing the neighbourhood around the plate")
+    g.add_argument("--env-solo-p", type=float, default=0.25,
+                   help="per-image probability of keeping one plate and erasing the siblings")
+    g.add_argument("--env-scene-p", type=float, default=0.35,
+                   help="per-image probability of replacing the background outside the target plates")
+    g.add_argument("--env-flat-p", type=float, default=0.4,
+                   help="within a scene swap, probability of a synthetic flat background instead of a donor scene")
+    g.add_argument("--env-donors", type=int, default=32,
+                   help="number of plate-free training crops used as donor scenes; 0 = synthetic only")
+    g.add_argument("--env-context-scale", default="1.6,2.6",
+                   help="neighbourhood size range as a multiple of the plate's larger side")
 
     g = p.add_argument_group("loss")
     g.add_argument("--box", type=float, default=7.5)
@@ -274,6 +303,7 @@ def main() -> None:
         raise SystemExit(f"data yaml not found: {data}")
     a.obj_logit_bias = _resolve_obj_logit_bias(a.obj_logit_bias, data, a.imgsz, a.obj_pw_pow)
     a.photometric_target = _pair_float(a.photometric_target, "photometric-target")
+    a.plate_scale_range = _pair_float(a.plate_scale_range, "plate-scale-range")
     a.role_mask_area = _pair_float(a.role_mask_area, "role-mask-area")
     a.role_mask_ratio = _pair_float(a.role_mask_ratio, "role-mask-ratio")
     cache = False if str(a.cache).lower() == "false" else a.cache
@@ -298,7 +328,9 @@ def main() -> None:
     print(f"[train_schemeC] quality_soft={a.quality_soft} obj_logit_bias={a.obj_logit_bias:+.3f} "
           f"(channel8: sigmoid(z - bias)) deploy_boxes={a.deploy_boxes}")
     aug_keys = ("hsv_h", "hsv_s", "hsv_v", "degrees", "translate", "scale", "fliplr", "mosaic", "mixup", "cutmix",
-                "photometric_p", "photometric_target", "photometric_blur_p", "photometric_noise_p")
+                "photometric_p", "photometric_target", "photometric_blur_p", "photometric_noise_p",
+                "plate_scale_p", "plate_scale_range", "plate_scale_max", "plate_scale_min_px",
+                "env_p", "env_relocate_p", "env_context_p", "env_solo_p", "env_scene_p", "env_flat_p")
     print("[train_schemeC] aug=" + " ".join(f"{k}={args[k]}" for k in aug_keys)
           + "  (erasing is classification-only and not applied to pose)")
     print(f"[train_schemeC] role: label_smoothing={a.role_label_smoothing} "

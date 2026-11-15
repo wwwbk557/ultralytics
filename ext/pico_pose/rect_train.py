@@ -19,6 +19,7 @@ No upstream file is modified; the patches are installed when
 from __future__ import annotations
 
 import math
+from copy import copy
 
 from ultralytics.cfg import DEFAULT_CFG
 from ultralytics.data.augment import LetterBox, Mosaic
@@ -29,7 +30,10 @@ from ultralytics.nn.autobackend import AutoBackend
 from ultralytics.utils import LOGGER
 from ultralytics.utils.torch_utils import unwrap_model
 
+from .box_sync import install_keypoint_box_sync
+from .env_decouple import install_env_decouple
 from .photometric import install_photometric
+from .plate_scale import install_plate_scale
 from .rect_augment import install_rect_mosaic
 
 import ultralytics.engine.trainer as _trainer_mod
@@ -41,6 +45,28 @@ _ORIG_MOSAIC = Mosaic.__init__
 _ORIG_LOAD_IMAGE = BaseDataset.load_image
 _ORIG_WARMUP = AutoBackend.warmup
 _INSTALLED = False
+
+# Every train-time augmentation hyperparameter; the final close_mosaic epochs zero all of them.
+_AUG_KEYS = (
+    "mosaic",
+    "mixup",
+    "cutmix",
+    "copy_paste",
+    "degrees",
+    "translate",
+    "scale",
+    "shear",
+    "perspective",
+    "fliplr",
+    "flipud",
+    "hsv_h",
+    "hsv_s",
+    "hsv_v",
+    "erasing",
+    "photometric_p",
+    "env_p",
+    "plate_scale_p",
+)
 
 
 def _check_imgsz_rect(imgsz, stride=32, min_dim=1, max_dim=2, floor=0):
@@ -109,6 +135,10 @@ class PicoRectTrainer(PoseTrainer):
     Batches are always (B, 3, H, W); ``rect`` batching stays off because the
     shape is already fixed.  Mosaic/mixup/cutmix are supported (mosaic is
     swapped for ``RectMosaic``), copy_paste is a no-op without segments.
+    Train-only extras are opt-in: ``photometric_p``, ``env_p`` (environment
+    decorrelation: relocate / context / solo / scene) and ``plate_scale_p``
+    (per-plate target scale jitter).  ``degrees > 0`` also installs the
+    keypoint-box sync so rotation keeps ``box == 4-kpt AABB``.
     """
 
     def __init__(self, cfg=DEFAULT_CFG, overrides=None, _callbacks=None):
@@ -151,7 +181,67 @@ class PicoRectTrainer(PoseTrainer):
                     f"photometric augmentation: installed {n} transform(s), "
                     f"p={p:.2f} target={getattr(self.args, 'photometric_target', (5.0, 60.0))}"
                 )
+            env_p = float(getattr(self.args, "env_p", 0.0) or 0.0)
+            if env_p > 0:
+                n = install_env_decouple(
+                    dataset,
+                    hw=self.args.imgsz,
+                    p=env_p,
+                    relocate_p=float(getattr(self.args, "env_relocate_p", 0.35) or 0.0),
+                    context_p=float(getattr(self.args, "env_context_p", 0.5) or 0.0),
+                    solo_p=float(getattr(self.args, "env_solo_p", 0.25) or 0.0),
+                    scene_p=float(getattr(self.args, "env_scene_p", 0.35) or 0.0),
+                    flat_p=float(getattr(self.args, "env_flat_p", 0.4) or 0.0),
+                    donors=int(getattr(self.args, "env_donors", 32) or 0),
+                    context_scale=getattr(self.args, "env_context_scale", (1.6, 2.6)),
+                )
+                LOGGER.info(
+                    f"environment decorrelation: installed {n} transform(s), p={env_p:.2f} "
+                    f"relocate={getattr(self.args, 'env_relocate_p', 0.35)} "
+                    f"context={getattr(self.args, 'env_context_p', 0.5)} "
+                    f"solo={getattr(self.args, 'env_solo_p', 0.25)} "
+                    f"scene={getattr(self.args, 'env_scene_p', 0.35)}"
+                )
+            plate_p = float(getattr(self.args, "plate_scale_p", 0.0) or 0.0)
+            if plate_p > 0:
+                n = install_plate_scale(
+                    dataset,
+                    p=plate_p,
+                    scale=getattr(self.args, "plate_scale_range", (0.85, 1.15)),
+                    max_plates=int(getattr(self.args, "plate_scale_max", 2) or 1),
+                    min_px=float(getattr(self.args, "plate_scale_min_px", 16.0) or 0.0),
+                )
+                LOGGER.info(
+                    f"plate scale jitter: installed {n} transform(s), p={plate_p:.2f} "
+                    f"range={getattr(self.args, 'plate_scale_range', (0.85, 1.15))} "
+                    f"max_plates={getattr(self.args, 'plate_scale_max', 2)} "
+                    f"min_px={getattr(self.args, 'plate_scale_min_px', 16.0)}"
+                )
+            degrees = float(getattr(self.args, "degrees", 0.0) or 0.0)
+            if degrees > 0:
+                n = install_keypoint_box_sync(dataset)
+                LOGGER.info(f"keypoint box sync: installed {n} transform(s), degrees={degrees:.1f}")
         return dataset
+
+    def _close_dataloader_mosaic(self):
+        """Final ``close_mosaic`` epochs train unaugmented; keep the box == 4-kpt AABB rule.
+
+        Upstream only zeros mosaic/mixup/cutmix/copy_paste and rebuilds the
+        transforms, which silently drops the custom env/plate-scale transforms
+        but leaves rotation, translation, scaling and HSV active.  Zero those
+        too and re-install the keypoint-box sync so labels stay deployment-shaped.
+        """
+        dataset = self.train_loader.dataset
+        hyp = copy(self.args)
+        for key in _AUG_KEYS:
+            if hasattr(hyp, key):
+                setattr(hyp, key, 0.0)
+        if hasattr(dataset, "mosaic"):
+            dataset.mosaic = False
+        if hasattr(dataset, "close_mosaic"):
+            LOGGER.info("closing mosaic and every train augmentation for the final epochs")
+            dataset.close_mosaic(hyp=hyp)
+            install_keypoint_box_sync(dataset)
 
     def setup_model(self):
         """Load the model and push the Pico eval flags from the run args onto the head.

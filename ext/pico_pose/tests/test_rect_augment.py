@@ -25,12 +25,15 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from ultralytics.cfg import DEFAULT_CFG_DICT  # noqa: E402
-from ultralytics.data.augment import Mosaic  # noqa: E402
+from ultralytics.data.augment import Mosaic, RandomFlip, RandomHSV, RandomPerspective  # noqa: E402
 from ultralytics.data.build import build_yolo_dataset  # noqa: E402
 from ultralytics.data.utils import check_det_dataset  # noqa: E402
 
+from ext.pico_pose.box_sync import KeypointBoxSync, install_keypoint_box_sync  # noqa: E402
+from ext.pico_pose.env_decouple import RandomEnvDecouple, install_env_decouple  # noqa: E402
+from ext.pico_pose.plate_scale import RandomPlateScale, install_plate_scale  # noqa: E402
 from ext.pico_pose.rect_augment import RectMosaic, install_rect_mosaic  # noqa: E402
-from ext.pico_pose.rect_train import install_rect_patches  # noqa: E402
+from ext.pico_pose.rect_train import PicoRectTrainer, install_rect_patches  # noqa: E402
 
 DATA = ROOT / "datasets/schemeC_split/data.yaml"
 HW = (480, 640)
@@ -145,3 +148,47 @@ def test_close_mosaic_rebuilds_transforms():
     for i in range(4):
         sample = ds[i]
         assert tuple(sample["img"].shape) == (3, *HW)
+
+
+def test_close_mosaic_turns_off_every_augmentation():
+    ds, _, cfg = _build(1.0)
+    # Install what PicoRectTrainer.build_dataset adds on top of the stock pipeline.
+    assert install_env_decouple(ds, hw=HW, p=0.4, scene_p=0.0) == 1
+    assert install_plate_scale(ds, p=0.35) == 1
+    assert install_keypoint_box_sync(ds) == 1
+
+    trainer = PicoRectTrainer.__new__(PicoRectTrainer)
+    trainer.args = cfg
+    trainer.train_loader = SimpleNamespace(dataset=ds)
+    trainer._close_dataloader_mosaic()
+
+    pipeline = []
+
+    def walk(obj):
+        for t in getattr(obj, "transforms", []):
+            pipeline.append(t)
+            walk(t)
+
+    walk(ds.transforms)
+    assert not any(isinstance(t, (RandomEnvDecouple, RandomPlateScale)) for t in pipeline)
+    assert any(isinstance(t, KeypointBoxSync) for t in pipeline), "box == 4-kpt AABB must survive the clean phase"
+    for t in pipeline:
+        if isinstance(t, Mosaic):
+            assert t.p == 0.0
+        elif isinstance(t, RandomPerspective):
+            assert (t.degrees, t.translate, t.scale, t.shear, t.perspective) == (0.0,) * 5
+        elif isinstance(t, RandomHSV):
+            assert (t.hgain, t.sgain, t.vgain) == (0.0, 0.0, 0.0)
+        elif isinstance(t, RandomFlip):
+            assert t.p == 0.0
+
+    np.random.seed(3)
+    for i in range(8):
+        sample = ds[i]
+        assert tuple(sample["img"].shape) == (3, *HW)
+        kpts = np.asarray(sample["keypoints"])
+        if len(sample["cls"]) == 0:
+            continue
+        xyxy = np.concatenate([kpts[..., :2].min(1), kpts[..., :2].max(1)], 1)
+        xywh = np.concatenate([(xyxy[:, :2] + xyxy[:, 2:]) / 2, xyxy[:, 2:] - xyxy[:, :2]], 1)
+        assert np.allclose(np.asarray(sample["bboxes"]), xywh, atol=1e-4), "clean phase must keep box == kpt AABB"
