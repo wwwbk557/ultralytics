@@ -32,9 +32,8 @@ TRAIN_KEYS = [
     "cls_loss",
     "dfl_loss",
     "color_loss",
-    "number_loss",
-    "quality_loss",
     "geom_loss",
+    "consistency_loss",
 ]
 METRIC_KEYS = [
     "metrics/precision(B)",
@@ -47,13 +46,13 @@ METRIC_KEYS = [
     "metrics/mAP50-95(P)",
 ]
 MONITOR_KEYS = [
-    "obj/AP",
-    "obj/P@0.5",
-    "obj/R@0.5",
-    "obj/GT_R@0.5",
+    "anchor/AP",
+    "anchor/P@0.5",
+    "anchor/R@0.5",
+    "anchor/GT_R@0.5",
     "mon/s_auc",
     "mon/s_gap",
-    "mon/attr_agree",
+    "mon/role_mask",
 ]
 VAL_PR_KEYS = ["val/P@0.5", "val/R@0.5", "val/P@0.8", "val/R@0.8"]
 ASSIGN_KEYS = [
@@ -74,13 +73,13 @@ PALETTE = ["#4c9be8", "#e8a33d", "#5fbf77", "#e05d5d", "#b07cc6", "#8d6e63", "#d
 
 # One-line explanations shown under each card (Chinese, browser side only).
 DESC = {
-    "obj/AP": "anchor 级 objectness AP：中心落在单个 GT 框内=正、框外=负、多框=歧义剔除；衡量 object/background 分离度",
-    "obj/P@0.5": "obj>0.5 的 anchor 中真正是正样本的比例",
-    "obj/R@0.5": "正样本 anchor 中 obj>0.5 的比例",
-    "obj/GT_R@0.5": "至少有一个 obj>0.5 anchor 落在框内的 GT 比例 = 导出后候选集召回上限",
-    "mon/s_auc": "TAL 正/负样本的 s=max sigmoid(cv_joint) 直方图 AUC；0.5=随机，越接近 1 越好",
+    "anchor/AP": "anchor 级候选置信 AP：中心落在单个 GT 框内=正、框外=负、多框=歧义剔除；衡量 conf/background 分离度",
+    "anchor/P@0.5": "max role sigmoid >0.5 的 anchor 中真正是正样本的比例",
+    "anchor/R@0.5": "正样本 anchor 中 max role sigmoid >0.5 的比例",
+    "anchor/GT_R@0.5": "至少有一个 conf>0.5 anchor 落在框内的 GT 比例 = 导出后候选集召回上限",
+    "mon/s_auc": "TAL 正/负样本的 s=max sigmoid(role) 直方图 AUC；0.5=随机，越接近 1 越好",
     "mon/s_gap": "s 的正样本均值 − 负样本均值",
-    "mon/attr_agree": "TAL 正样本上 argmax(cv_joint) 与 argmax(colour)×7+argmax(role) 的一致率",
+    "mon/role_mask": "正样本上 colour role-mask 的平均权重（1 = 完全没 mask）",
     "assign/tiny_med": "tiny(<32² px) 每 GT 分到的 anchor 数中位数（topk=10）",
     "assign/tiny_iqr": "tiny 桶 q75−q25，看分配是否稳定",
     "assign/small_med": "small(32²–96² px) 每 GT 分到 anchor 数中位数",
@@ -101,14 +100,14 @@ DESC = {
     "metrics/mAP50-95(B)": "Box mAP@0.5:0.95",
     "metrics/mAP50(P)": "Pose mAP@0.5",
     "metrics/mAP50-95(P)": "Pose mAP@0.5:0.95",
-    "train/quality_loss": "通道 8 objectness 的 BCE（全 anchor，带 pos_weight）",
-    "train/cls_loss": "cv_joint 14 类 BCE（全 anchor，TAL 软目标；只用于训练/TAL）",
-    "train/color_loss": "颜色 2 类交叉熵（TAL 正样本）",
-    "train/number_loss": "角色 7 类交叉熵（TAL 正样本）",
+    "train/cls_loss": "7 类 role BCE（全 anchor，TAL 软目标；导出 conf 与它同源）",
+    "train/color_loss": "颜色 1-logit BCE（TAL 正样本，role mask 加权）",
+    "train/geom_loss": "四角几何正则（尺度不变）",
+    "train/consistency_loss": "曝光/模糊视图与干净视图的逐 logit 二值 KL",
 }
 
 SECTION_HINTS = {
-    "Objectness / TAL monitors": "obj/* 在 val 集上算（候选集质量），mon/* 在训练 batch 上算（TAL 排序与两条分类路径一致性）",
+    "Objectness / TAL monitors": "anchor/* 在 val 集上算（候选集质量），mon/* 在训练 batch 上算（TAL 排序与 colour mask 覆盖率）",
     "Val P/R at fixed confidence": "固定 conf 下、按 IoU 0.5 类内贪心匹配的 val precision/recall；看固定工作点是否退化，不受日志 max-F1 阈值漂移影响",
     "Assignment (anchors per GT)": "每个 GT 实际分到多少正样本 anchor，按面积分桶；topk=10，median <5 或 zero_frac >10% 即分配饥饿",
 }

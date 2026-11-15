@@ -1,16 +1,16 @@
-"""Validation-time objectness diagnostics for the Pico pose head.
+"""Validation-time candidate-confidence diagnostics for the Pico pose head.
 
-The compact export keeps only channel 8 as the candidate source, so its
-ranking must be measured on its own, independently of TAL:
+The exported 16-channel tensor has no objectness: the seven role logits are the
+confidence, so their max must be measured on its own, independently of TAL:
 
 * anchors are labelled by their *centre*: positive when the centre falls in
   exactly one GT box, ambiguous when it falls in several (excluded), negative
   otherwise;
-* ``obj/AP``, ``obj/P@0.5`` and ``obj/R@0.5`` are anchor-level classification
-  metrics computed from those labels;
-* ``obj/GT_R@0.5`` is the per-GT recall (fraction of GT boxes that have at least
-  one anchor with objectness > 0.5 whose centre falls inside) - this is the
-  recall ceiling of the exported candidate set.
+* ``anchor/AP``, ``anchor/P@0.5`` and ``anchor/R@0.5`` are anchor-level
+  classification metrics computed from those labels;
+* ``anchor/GT_R@0.5`` is the per-GT recall (fraction of GT boxes that have at
+  least one anchor with role confidence > 0.5 whose centre falls inside) -
+  the recall ceiling of the exported candidate set.
 
 The monitor hooks the head of the EMA model during validation and wraps
 ``validator.update_metrics`` so no extra forward pass is needed.
@@ -21,7 +21,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-__all__ = ("AnchorStats", "ObjectnessMonitor", "hist_auc", "assignment_summary", "ASSIGN_BUCKETS")
+__all__ = ("AnchorStats", "AnchorConfMonitor", "hist_auc", "assignment_summary", "ASSIGN_BUCKETS")
 
 BINS = 1000
 
@@ -85,7 +85,7 @@ def assignment_summary(
 
 
 class AnchorStats:
-    """Accumulate anchor-level objectness labels and scores over a val pass."""
+    """Accumulate anchor-level candidate labels and confidences over a val pass."""
 
     def __init__(self, thr: float = 0.5):
         self.thr = float(thr)
@@ -94,21 +94,21 @@ class AnchorStats:
         self.n_pos = 0
         self.n_neg = 0
         self.n_amb = 0
-        self.tp = 0  # positives with obj > thr
-        self.fp = 0  # negatives with obj > thr
+        self.tp = 0  # positives with conf > thr
+        self.fp = 0  # negatives with conf > thr
         self.gt_total = 0
         self.gt_hit = 0
 
     @torch.no_grad()
-    def add(self, obj: torch.Tensor, centers: torch.Tensor, boxes_xyxy: torch.Tensor) -> None:
+    def add(self, conf: torch.Tensor, centers: torch.Tensor, boxes_xyxy: torch.Tensor) -> None:
         """Add one image.
 
         Args:
-            obj: (A,) objectness probabilities.
+            conf: (A,) candidate confidences (max role sigmoid, as used by NMS).
             centers: (A, 2) anchor centres in input-image pixels.
             boxes_xyxy: (G, 4) GT boxes in input-image pixels (empty allowed).
         """
-        if obj.numel() == 0:
+        if conf.numel() == 0:
             return
         if boxes_xyxy.numel():
             cx, cy = centers[:, 0:1], centers[:, 1:2]
@@ -120,8 +120,8 @@ class AnchorStats:
             )
             count = inside.sum(1)
         else:
-            inside = torch.zeros((obj.numel(), 0), dtype=torch.bool, device=obj.device)
-            count = torch.zeros(obj.numel(), dtype=torch.long, device=obj.device)
+            inside = torch.zeros((conf.numel(), 0), dtype=torch.bool, device=conf.device)
+            count = torch.zeros(conf.numel(), dtype=torch.long, device=conf.device)
 
         pos = count == 1
         neg = count == 0
@@ -129,11 +129,11 @@ class AnchorStats:
         self.n_neg += int(neg.sum())
         self.n_amb += int((count > 1).sum())
         if pos.any():
-            self.pos_hist += np.histogram(obj[pos].float().cpu().numpy(), bins=BINS, range=(0.0, 1.0))[0]
+            self.pos_hist += np.histogram(conf[pos].float().cpu().numpy(), bins=BINS, range=(0.0, 1.0))[0]
         if neg.any():
-            self.neg_hist += np.histogram(obj[neg].float().cpu().numpy(), bins=BINS, range=(0.0, 1.0))[0]
+            self.neg_hist += np.histogram(conf[neg].float().cpu().numpy(), bins=BINS, range=(0.0, 1.0))[0]
 
-        hit = obj > self.thr
+        hit = conf > self.thr
         self.tp += int((pos & hit).sum())
         self.fp += int((neg & hit).sum())
         if inside.numel():
@@ -142,9 +142,9 @@ class AnchorStats:
 
     def result(self) -> dict[str, float]:
         out = {
-            "obj/P@0.5": self.tp / max(self.tp + self.fp, 1),
-            "obj/R@0.5": self.tp / max(self.n_pos, 1),
-            "obj/GT_R@0.5": self.gt_hit / max(self.gt_total, 1),
+            "anchor/P@0.5": self.tp / max(self.tp + self.fp, 1),
+            "anchor/R@0.5": self.tp / max(self.n_pos, 1),
+            "anchor/GT_R@0.5": self.gt_hit / max(self.gt_total, 1),
         }
         n_pos, n_neg = self.pos_hist.sum(), self.neg_hist.sum()
         if n_pos > 0 and n_neg > 0:
@@ -155,9 +155,9 @@ class AnchorStats:
             mrec = np.concatenate(([0.0], rec, [1.0]))
             mpre = np.concatenate(([1.0], prec, [0.0]))
             ap = np.mean([mpre[mrec >= r].max() if (mrec >= r).any() else 0.0 for r in np.linspace(0.0, 1.0, 101)])
-            out["obj/AP"] = float(ap)
+            out["anchor/AP"] = float(ap)
         else:
-            out["obj/AP"] = float("nan")
+            out["anchor/AP"] = float("nan")
         return out
 
 
@@ -174,7 +174,7 @@ def _box_iou_np(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.where(union > 0, inter / union, 0.0).astype(np.float32)
 
 
-class ObjectnessMonitor:
+class AnchorConfMonitor:
     """Attach to the EMA head + validator for the duration of one validate()."""
 
     PR_THRESHOLDS = (0.5, 0.8)  # fixed score thresholds for deployment-style P/R
@@ -216,7 +216,8 @@ class ObjectnessMonitor:
         module, p = self._last
         self._last = None
         with torch.no_grad():
-            obj = p["quality"][:, 0].sigmoid()  # (B, A)
+            # NMS ranks an anchor by its best role score; measure exactly that.
+            conf = p["number"].sigmoid().amax(1)  # (B, A)
             anchors, strides = module.anchors, module.strides  # (2, A), (1, A)
             if anchors is None:
                 return
@@ -225,7 +226,7 @@ class ObjectnessMonitor:
             boxes = batch["bboxes"].reshape(-1, 4).float().to(centers.device)
             bidx = batch["batch_idx"].reshape(-1).long().to(centers.device)
             gcls = batch["cls"].reshape(-1).long()
-            for b in range(obj.shape[0]):
+            for b in range(conf.shape[0]):
                 g = boxes[bidx == b]
                 if len(g):
                     cx, cy, gw, gh = g[:, 0] * w, g[:, 1] * h, g[:, 2] * w, g[:, 3] * h
@@ -233,7 +234,7 @@ class ObjectnessMonitor:
                 else:
                     gxyxy = g.reshape(0, 4)
                 self.n_gt += len(g)
-                self.stats.add(obj[b], centers, gxyxy)
+                self.stats.add(conf[b], centers, gxyxy)
                 self._match_fixed_conf(preds[b] if preds is not None and b < len(preds) else None, gxyxy, gcls[bidx == b])
 
     def _match_fixed_conf(self, det: dict | None, gxyxy: torch.Tensor, gcls: torch.Tensor) -> None:

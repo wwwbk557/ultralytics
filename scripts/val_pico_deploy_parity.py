@@ -1,23 +1,24 @@
-"""Measure pose-metric parity between the *training* score path and the *export* path.
+"""Measure pose-metric parity between the *training* box path and the *export* path.
 
 The compact head keeps an auxiliary box branch (``cv2`` + DFL) for TAL assignment
-and for validation. The exported graph only runs ``cv_compact`` (raw18), so the
-deployment decoder builds the NMS box from the four predicted corners:
+and for validation. The exported graph only runs ``cv_shared``/``cv_compact``/
+``cv3`` (raw16), so the deployment decoder builds the NMS box from the four
+predicted corners:
 
     bbox = (min(x), min(y), max(x), max(y)) over the 4 keypoints
 
-This script runs the stock ``PoseValidator`` on a fixed random val subset three
-times, changing only how the NMS box is produced:
+This script runs the stock ``PoseValidator`` on a fixed random val subset twice,
+changing only how the NMS box is produced:
 
-* ``box``     - box branch + DFL (what ``metrics/mAP50-95(P)`` currently reports)
-* ``kpts``    - box derived from the 4 decoded corners (what deployment does)
-* ``joint``   - box branch, scores from the train-only ``cv_joint`` head (reference)
+* ``box``  - box branch + DFL (train-only reference)
+* ``kpts`` - box derived from the 4 decoded corners (what deployment does)
 
-Same weights, same subset, same seed, so the delta is purely the box source.
+Scores are always ``colour x role sigmoid`` in both modes, i.e. exactly what the
+exported 16-channel tensor yields.
 
 Usage:
     python scripts/val_pico_deploy_parity.py --weights runs/pose/.../weights/last.pt --n 192
-    python scripts/val_pico_deploy_parity.py --weights ... --mode kpts --obj-thresh 0.05
+    python scripts/val_pico_deploy_parity.py --weights ... --mode kpts
 """
 
 from __future__ import annotations
@@ -76,7 +77,7 @@ def kpt_box_inference(self, x):
         ),
         1,
     )
-    scores = self._class_scores(x["quality"].sigmoid(), x["color"].softmax(1), x["number"].softmax(1))
+    scores = self._class_scores(self.color_prob(x["color"]), x["number"].sigmoid())
     return torch.cat((dbox, scores, kpts.reshape(bs, self.nk, -1)), 1)
 
 
@@ -84,18 +85,11 @@ def box_branch_inference(self, x):
     """Stock validation inference: NMS box from cv2 + DFL (baseline)."""
     bs, kpts, _, _ = _decode(self, x)
     dbox = self.decode_bboxes(self.dfl(x["boxes"]), self.anchors.unsqueeze(0)) * self.strides
-    scores = self._class_scores(x["quality"].sigmoid(), x["color"].softmax(1), x["number"].softmax(1))
+    scores = self._class_scores(self.color_prob(x["color"]), x["number"].sigmoid())
     return torch.cat((dbox, scores, kpts.reshape(bs, self.nk, -1)), 1)
 
 
-def joint_inference(self, x):
-    """Reference: train-only joint classifier provides the scores (not deployable)."""
-    bs, kpts, _, _ = _decode(self, x)
-    dbox = self.decode_bboxes(self.dfl(x["boxes"]), self.anchors.unsqueeze(0)) * self.strides
-    return torch.cat((dbox, x["scores"].sigmoid(), kpts.reshape(bs, self.nk, -1)), 1)
-
-
-MODES = {"box": box_branch_inference, "kpts": kpt_box_inference, "joint": joint_inference}
+MODES = {"box": box_branch_inference, "kpts": kpt_box_inference}
 
 
 def parse():
@@ -106,9 +100,7 @@ def parse():
     p.add_argument("--batch", type=int, default=8)
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--mode", choices=sorted(MODES), default="box")
-    p.add_argument("--obj-thresh", type=float, default=None, help="emulate the deploy quality gate")
-    p.add_argument("--obj-bias", type=float, default=None, help="objectness logit offset (log pos_weight)")
-    p.add_argument("--builtin", action="store_true", help="use the head's own deploy_boxes path (applies obj_logit_bias)")
+    p.add_argument("--builtin", action="store_true", help="use the head's own deploy_boxes path")
     p.add_argument("--iou", type=float, default=0.7, help="NMS IoU (deploy node defaults to 0.45)")
     p.add_argument("--conf", type=float, default=0.001, help="pre-NMS conf used by the validator")
     p.add_argument("--json", action="store_true", help="print one json line instead of a table")
@@ -134,14 +126,9 @@ def main() -> None:
     model = YOLO(args.weights).model.eval()
     head = model.model[-1]
     if args.builtin:
-        head.deploy_boxes = True   # head._inference -> _corner_bboxes + obj_prob(bias)
+        head.deploy_boxes = True   # head._inference -> corner AABB
     else:
         head._inference = MethodType(MODES[args.mode], head)
-    if args.obj_thresh is not None:
-        head.obj_threshold = float(args.obj_thresh)
-        head.deploy_filter = True
-    if args.obj_bias is not None:
-        head.obj_logit_bias = float(args.obj_bias)
 
     vargs = get_cfg(
         overrides=dict(
@@ -173,13 +160,12 @@ def main() -> None:
 
     keep = ("metrics/precision(P)", "metrics/recall(P)", "metrics/mAP50(P)", "metrics/mAP50-95(P)",
             "metrics/mAP50(B)", "metrics/mAP50-95(B)")
-    out = {"weights": args.weights, "mode": args.mode, "n": len(ds), "epoch": ckpt.get("epoch"),
-           "obj_thresh": args.obj_thresh, "iou": args.iou}
+    out = {"weights": args.weights, "mode": args.mode, "n": len(ds), "epoch": ckpt.get("epoch"), "iou": args.iou}
     out.update({k.split("/")[-1]: round(float(metrics[k]), 5) for k in keep})
     if args.json:
         print(json.dumps(out))
     else:
-        print(f"\n{Path(args.weights).parent.name}  epoch={out['epoch']}  mode={args.mode}  n={out['n']}  gate={args.obj_thresh}")
+        print(f"\n{Path(args.weights).parent.name}  epoch={out['epoch']}  mode={args.mode}  n={out['n']}")
         for k in keep:
             print(f"  {k:24s} {float(metrics[k]):.4f}")
 

@@ -105,12 +105,7 @@ dfl: 1.5 # (float) distribution focal loss gain
 pose: 12.0 # (float) pose loss gain (pose tasks)
 kobj: 1.0 # (float) keypoint objectness loss gain (pose tasks)
 color: 0.1 # (float) compact colour classification loss gain
-number: 0.1 # (float) compact number classification loss gain
-quality: 0.05 # (float) compact objectness (channel 8) loss gain
 consistency: 0.0 # (float) exposure/blur consistency KL gain on the exported colour/role heads (train only)
-obj_pw_pow: 0.5 # (float) exponent on objectness pos_weight (1.0 = balanced, <1 favours background)
-quality_soft: 0.0 # (float) blend IoU into the objectness target (0 = hard 1/0 foreground flag)
-obj_logit_bias: 0.0 # (float) subtract from the objectness logit (log(pos_weight)) so sigmoid is calibrated
 deploy_boxes: True # (bool) validation/NMS use the box built from the 4 corners, i.e. the exported graph
 geom: 0.0 # (float) pose geometry regularization gain; 0 disables
 geom_par: 0.10 # (float) parallelogram residual weight
@@ -133,9 +128,9 @@ plate_scale_p: 0.0 # (float) probability of resizing plates on the final canvas 
 plate_scale_range: [0.85, 1.15] # (list) uniform resize factor range applied to the picked plate
 plate_scale_max: 2 # (int) max plates resized per image
 plate_scale_min_px: 16.0 # (float) plates smaller than this kp-AABB long side are only kept or enlarged
-role_label_smoothing: 0.0 # (float) label smoothing for the compact colour/number heads
-role_mask_area: [20.0, 80.0] # (list) soft role-loss mask: armour area ramp, px^2
-role_mask_ratio: [0.10, 0.20] # (list) soft role-loss mask: short/long edge ratio ramp
+role_label_smoothing: 0.0 # (float) label smoothing for the compact colour head
+role_mask_area: [20.0, 80.0] # (list) soft colour-loss mask: armour area ramp, px^2
+role_mask_ratio: [0.10, 0.20] # (list) soft colour-loss mask: short/long edge ratio ramp
 rle: 1.0 # (float) rle loss gain (pose tasks)
 angle: 1.0 # (float) oriented angle loss gain (obb tasks)
 nbs: 64 # (int) nominal batch size used for loss normalization

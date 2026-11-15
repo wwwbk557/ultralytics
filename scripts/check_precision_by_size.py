@@ -33,7 +33,6 @@ def parse_args():
     p.add_argument("--conf", type=float, default=0.001)
     p.add_argument("--iou", type=float, default=0.7)
     p.add_argument("--multi-label", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--obj-thresh", type=float, default=None, help="enable the objectness gate at this threshold")
     return p.parse_args()
 
 
@@ -78,10 +77,6 @@ def main():
 
     loader, data = build_loader(args.data, args.n, args.batch, args.workers)
     model = YOLO(args.weights).model.eval()
-    if args.obj_thresh is not None:
-        head = model.model[-1]
-        head.obj_threshold = args.obj_thresh
-        head.deploy_filter = True
 
     thr_list = (0.1, 0.25, 0.5, 0.7, 0.8)
     tp = {t: {b: 0 for b in BUCKETS + ("background", "dup")} for t in thr_list}

@@ -95,7 +95,8 @@ def parse() -> argparse.Namespace:
     g.add_argument("--hsv-h", type=float, default=0.015)
     g.add_argument("--hsv-s", type=float, default=0.7)
     g.add_argument("--hsv-v", type=float, default=0.4)
-    g.add_argument("--degrees", type=float, default=5.0)
+    g.add_argument("--degrees", type=float, default=5.0,
+                   help="in-plane rotation, uniform +/-degrees (camera roll); also enables keypoint box sync")
     g.add_argument("--translate", type=float, default=0.1)
     g.add_argument("--scale", type=float, default=0.5)
     g.add_argument("--shear", type=float, default=0.0)
@@ -110,6 +111,17 @@ def parse() -> argparse.Namespace:
     g.add_argument("--auto-augment", default="none")
     g.add_argument("--erasing", type=float, default=0.4)
 
+    g = p.add_argument_group("environment decorrelation (P0; train only)")
+    g.add_argument("--env-p", type=float, default=0.0,
+                   help="probability of applying the environment-decorrelation block to one image; 0 disables")
+    g.add_argument("--env-relocate-p", type=float, default=0.35)
+    g.add_argument("--env-context-p", type=float, default=0.5)
+    g.add_argument("--env-solo-p", type=float, default=0.25)
+    g.add_argument("--env-scene-p", type=float, default=0.35)
+    g.add_argument("--env-flat-p", type=float, default=0.4)
+    g.add_argument("--env-donors", type=int, default=32)
+    g.add_argument("--env-context-scale", default="1.6,2.6")
+
     g = p.add_argument_group("loss")
     g.add_argument("--box", type=float, default=7.5)
     g.add_argument("--cls", type=float, default=0.5)
@@ -117,9 +129,6 @@ def parse() -> argparse.Namespace:
     g.add_argument("--pose", type=float, default=12.0)
     g.add_argument("--kobj", type=float, default=1.0)
     g.add_argument("--color", type=float, default=0.1)
-    g.add_argument("--number", type=float, default=0.1)
-    g.add_argument("--quality", type=float, default=0.05, help="objectness (channel 8) loss weight")
-    g.add_argument("--obj-pw-pow", type=float, default=0.5, help="exponent on objectness pos_weight; 1=balanced, 0.5 background-heavy")
     g.add_argument("--geom", type=float, default=0.0, help="geometry gain; 0 disables")
     g.add_argument("--geom-par", type=float, default=0.10)
     g.add_argument("--geom-opp", type=float, default=0.33)

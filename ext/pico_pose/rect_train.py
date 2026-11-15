@@ -251,39 +251,35 @@ class PicoRectTrainer(PoseTrainer):
         """
         ckpt = super().setup_model()
         self._apply_pico_eval_flags(self.model)
-        # A checkpoint may carry the old criterion with the old 4-slot loss and
-        # the old args namespace.  Drop it so the first loss call rebuilds it
-        # against self.args (new colour/number/consistency weights included).
+        # A checkpoint may carry a criterion built from its own args namespace.
+        # Drop it so the first loss call rebuilds it against self.args (current
+        # colour/consistency/role-mask weights included).
         inner = unwrap_model(self.model)
         if getattr(inner, "criterion", None) is not None:
             inner.criterion = None
         return ckpt
 
     def _apply_pico_eval_flags(self, model) -> None:
-        """Align validation with the exported graph (corner boxes + objectness bias)."""
+        """Align validation with the exported graph (NMS boxes from the four corners)."""
         head = getattr(unwrap_model(model), "model", None)
         head = head[-1] if head is not None else None
         if head is None or not hasattr(head, "deploy_boxes"):
             return
         head.deploy_boxes = bool(getattr(self.args, "deploy_boxes", False))
-        head.obj_logit_bias = float(getattr(self.args, "obj_logit_bias", 0.0))
-        # The checkpoint pickles the old 4-tuple; the loss now returns 5 extra
+        # The checkpoint pickles the old tuple; the loss now returns 3 extra
         # slots, and PoseTrainer.get_validator builds the CSV header from this.
-        head.extra_loss_names = ("color_loss", "number_loss", "quality_loss", "geom_loss", "consistency_loss")
-        LOGGER.info(
-            f"pico eval parity: deploy_boxes={head.deploy_boxes} "
-            f"obj_logit_bias={head.obj_logit_bias:+.3f} (sigmoid(z - bias) on channel 8)"
-        )
+        head.extra_loss_names = ("color_loss", "geom_loss", "consistency_loss")
+        LOGGER.info(f"pico eval parity: deploy_boxes={head.deploy_boxes}")
 
     def validate(self):
-        """Run the stock validation plus the objectness/TAL monitors."""
-        from .monitor import ObjectnessMonitor
+        """Run the stock validation plus the anchor-confidence/TAL monitors."""
+        from .monitor import AnchorConfMonitor
 
-        monitor = ObjectnessMonitor(self)
+        monitor = AnchorConfMonitor(self)
         try:
             monitor.attach()
         except Exception as e:  # never break training because of diagnostics
-            LOGGER.warning(f"objectness monitor disabled: {e}")
+            LOGGER.warning(f"anchor-confidence monitor disabled: {e}")
             monitor = None
         try:
             metrics, fitness = super().validate()

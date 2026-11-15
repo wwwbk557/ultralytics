@@ -1,14 +1,14 @@
 """Loss functions for the compact four-keypoint pose head.
 
 ``PicoCompactPoseLoss`` combines TAL assignment, CIoU/DFL box loss,
-OKS keypoint loss and visibility BCE with three attribute terms (colour, role,
-objectness) and an optional pose-geometry regularizer. The returned vector is
-``[box, pose, kobj, cls, dfl, color, number, quality, geom]``.
+OKS keypoint loss and three extra terms (colour BCE, pose geometry, photometric
+consistency). The returned vector is
+``[box, pose, kobj, cls, dfl, color, geom, consistency]``.
 
-The ``quality`` slot (channel 8 of the compact export) is trained as
-*objectness*: 1 on every TAL-positive anchor, 0 elsewhere. ``colour`` and
-``number`` are cross-entropy trained on those positives only, and at inference
-they decide the class while objectness only gates the anchor.
+``cls`` is the seven-role head: BCE over all anchors against TAL soft targets,
+the same quantity the exported graph uses as confidence. There is no objectness
+channel. ``colour`` is a one-logit BCE trained on TAL positives only, weighted
+by the role mask; at inference ``score[c * 7 + r] = color_p[c] * sigmoid(role_logit[r])``.
 """
 
 from __future__ import annotations
@@ -138,16 +138,13 @@ def role_mask_weight(
 
 
 class PicoCompactPoseLoss(v8PoseLoss):
-    """TAL box/pose loss with colour, role, objectness (channel 8) and geometry terms."""
+    """TAL box/pose loss with colour, role (cls) and geometry terms."""
 
     def __init__(self, model):
         super().__init__(model)
-        # A calibrated head has obj_logit_bias folded into channel 8, so its raw
-        # logit is no longer the quantity the BCE target is defined against.
-        assert not getattr(model.model[-1], "_obj_logit_calibrated", False), (
-            "refusing to train against a calibrated objectness head (bias already baked into the weights)"
-        )
-        self._unit_checked = False  # one-shot guard for the q_iou grid/px conversion
+        # ``preds["scores"]`` is the seven-role head now, so TAL must allocate
+        # seven target-score columns and assign against labels mapped 14 -> 7.
+        self.assigner.num_classes = NUM_ROLE
         # A module-scope weakref avoids registering the model as a child of its
         # own criterion (the criterion is itself a submodule of the model: a
         # strong reference would create a cycle and break train()/state_dict()).
@@ -155,7 +152,7 @@ class PicoCompactPoseLoss(v8PoseLoss):
         self.color_map = torch.tensor(COLOR_BY_CLASS, device=self.device, dtype=torch.long)
         self.number_map = torch.tensor(ROLE_BY_CLASS, device=self.device, dtype=torch.long)
 
-    # ---- epoch-level monitors (TAL ranking / cv_joint vs attribute agreement) ----
+    # ---- epoch-level monitors (TAL score ranking / role-mask coverage) ----
     def _monitors(self) -> dict:
         if not hasattr(self, "_mon") or self._mon is None:
             dev = self.device
@@ -170,8 +167,6 @@ class PicoCompactPoseLoss(v8PoseLoss):
                 "neg_sum": z(),
                 "pos_n": z(),
                 "neg_n": z(),
-                "agree": z(),
-                "agree_n": z(),
                 "role_w": z(),
                 "role_n": z(),
                 "assign_areas": [],
@@ -187,13 +182,11 @@ class PicoCompactPoseLoss(v8PoseLoss):
         self._mon = None
         nan = float("nan")
         # keep the keys stable so results.csv headers never shift between epochs
-        out: dict[str, float] = {"mon/s_auc": nan, "mon/s_gap": nan, "mon/attr_agree": nan, "mon/role_mask": nan}
+        out: dict[str, float] = {"mon/s_auc": nan, "mon/s_gap": nan, "mon/role_mask": nan}
         pos_n, neg_n = float(m["pos_n"]), float(m["neg_n"])
         if pos_n > 0 and neg_n > 0:
             out["mon/s_auc"] = hist_auc(m["pos_hist"].cpu().numpy(), m["neg_hist"].cpu().numpy())
             out["mon/s_gap"] = float(m["pos_sum"] / pos_n - m["neg_sum"] / neg_n)
-        if float(m["agree_n"]) > 0:
-            out["mon/attr_agree"] = float(m["agree"] / m["agree_n"])
         if float(m["role_n"]) > 0:
             out["mon/role_mask"] = float(m["role_w"] / m["role_n"])
         if m.get("assign_areas"):
@@ -249,9 +242,9 @@ class PicoCompactPoseLoss(v8PoseLoss):
     def _augmented_attrs(self, img: torch.Tensor) -> dict | None:
         """Run the backbone/neck/head once on a photometric view, attributes only.
 
-        ``aux_box=False`` skips the train-only ``cv2``/``cv_joint`` branches, so
-        the extra forward only pays for the compact colour/role head.  Returns
-        ``None`` outside training or when the head layout is not the Pico head.
+        ``aux_box=False`` skips the train-only ``cv2`` branch, so the extra
+        forward only pays for the compact colour/role head. Returns ``None``
+        outside training or when the head layout is not the Pico head.
         """
         ref = _MODEL_REFS.get(id(self))
         model = ref() if ref is not None else None
@@ -278,10 +271,17 @@ class PicoCompactPoseLoss(v8PoseLoss):
         weight: torch.Tensor,
         temperature: float = 2.0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Weighted KL(student || teacher) with the teacher detached."""
-        student = F.log_softmax(student_logits / temperature, dim=-1)
-        teacher = F.softmax(teacher_logits.detach() / temperature, dim=-1)
-        kl = F.kl_div(student, teacher, reduction="none").sum(-1) * (temperature**2)
+        """Weighted per-logit binary KL(student || teacher), teacher detached.
+
+        Colour is one complementary logit and the seven roles are independent
+        binaries, so this is a sum of Bernoulli KLs rather than a softmax KL.
+        """
+        student = student_logits / temperature
+        teacher_p = torch.sigmoid(teacher_logits.detach() / temperature).clamp(1e-6, 1.0 - 1e-6)
+        kl = teacher_p * (teacher_p.log() - F.logsigmoid(student)) + (1.0 - teacher_p) * (
+            torch.log1p(-teacher_p) - F.logsigmoid(-student)
+        )
+        kl = kl.sum(-1) * (temperature**2)
         weight = weight.clamp_min(0.0)
         return (kl * weight).sum(), weight.sum()
 
@@ -290,8 +290,14 @@ class PicoCompactPoseLoss(v8PoseLoss):
         pred_kpts = preds["kpts"].permute(0, 2, 1).contiguous()
         bs = pred_kpts.shape[0]
         loss = torch.zeros(5, device=self.device, dtype=torch.float32)
+        # TAL assigns against the seven role classes; the 14-class labels feed
+        # only the colour head below, so map them for this call alone.
+        tal_batch = {
+            **batch,
+            "cls": self.number_map[batch["cls"].view(-1).long()].view_as(batch["cls"]).to(batch["cls"].dtype),
+        }
         (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor), det_loss, _ = (
-            self.get_assigned_targets_and_loss(preds, batch)
+            self.get_assigned_targets_and_loss(preds, tal_batch)
         )
         # The TAL assigner returns float zeros when the whole batch has no GT
         # (n_max_boxes == 0), everything else returns bool; normalise here because
@@ -302,35 +308,6 @@ class PicoCompactPoseLoss(v8PoseLoss):
         imgsz = torch.tensor(preds["feats"][0].shape[2:], device=self.device, dtype=pred_kpts.dtype) * self.stride[0]
         self._track_assignment(batch, fg_mask, target_gt_idx, imgsz)
         pred_kpts = self.kpts_decode(anchor_points, pred_kpts.view(bs, -1, *self.kpt_shape))
-
-        # Soft objectness target for `quality_soft > 0`: IoU between the box that
-        # the four predicted corners would produce at deployment and the assigned
-        # GT box. That is the same quantity the deployment NMS uses to merge
-        # duplicates, so the objectness channel becomes a localisation-quality
-        # score instead of a plain foreground flag.
-        q_iou = None
-        q_soft = float(getattr(self.hyp, "quality_soft", 0.0))
-        if q_soft > 0 and fg_mask.any():
-            with torch.no_grad():
-                # target_bboxes leaves the assigner as *pixel* xyxy (get_assigned_targets_and_loss
-                # scaled them by imgsz before TAL, tal.py gathers gt_bboxes directly), so this is
-                # the one and only stride division -- calculate_keypoints_loss does the same.
-                tb = (target_bboxes / stride_tensor.view(1, -1, 1))[fg_mask]
-                if not self._unit_checked:
-                    hg, wg = float(preds["feats"][0].shape[2]), float(preds["feats"][0].shape[3])
-                    assert float(tb.max()) <= max(hg, wg) + 2.0, (
-                        f"target_bboxes units changed: /stride max={float(tb.max()):.1f} but the P3 grid is "
-                        f"{hg:.0f}x{wg:.0f}; pixel->grid conversion would be wrong"
-                    )
-                    self._unit_checked = True
-                pk = pred_kpts[fg_mask][..., :2]
-                x0, y0 = pk[..., 0].min(-1).values, pk[..., 1].min(-1).values
-                x1, y1 = pk[..., 0].max(-1).values, pk[..., 1].max(-1).values
-                iw = (torch.minimum(x1, tb[:, 2]) - torch.maximum(x0, tb[:, 0])).clamp_min(0)
-                ih = (torch.minimum(y1, tb[:, 3]) - torch.maximum(y0, tb[:, 1])).clamp_min(0)
-                inter = iw * ih
-                union = (x1 - x0) * (y1 - y0) + (tb[:, 2] - tb[:, 0]) * (tb[:, 3] - tb[:, 1]) - inter
-                q_iou = inter / union.clamp_min(1e-9)
 
         keypoints = None
         if fg_mask.sum():
@@ -368,34 +345,7 @@ class PicoCompactPoseLoss(v8PoseLoss):
                 mon["neg_n"] += neg.sum()
 
         n_pos = fg_mask.sum().clamp_min(1)
-        extra = torch.zeros(5, device=self.device, dtype=torch.float32)
-
-        # Channel 8 is objectness, not a quality regression: 1 on TAL positives,
-        # 0 on every other anchor. It is used as a gate at inference, so it must
-        # learn background suppression rather than localisation quality.
-        #
-        # pos_weight = (n_neg / n_pos) ** obj_pw_pow. With mean reduction an
-        # exponent of 1 is class-balanced, so every anchor with a true
-        # posterior above ~1/w is pushed above 0.5 (background near objects
-        # included). The default 0.5 keeps positives high while letting
-        # negatives dominate the total, which is what suppresses background.
-        #
-        # This term is deliberately outside the `fg_mask.any()` block: an
-        # all-negative batch (no GT, or no assigned anchor) is the cleanest
-        # background signal and must still push objectness down everywhere.
-        q_logits = preds["quality"].permute(0, 2, 1).reshape(-1).float()
-        q_target_all = torch.zeros_like(q_logits)
-        if fg_mask.any():
-            q_target_all[fg_mask.reshape(-1)] = 1.0
-            if q_iou is not None:
-                # (1 - s) + s * IoU keeps every positive well above the negatives
-                # while ordering them by the IoU the deployment NMS will see.
-                q_target_all[fg_mask.reshape(-1)] = (1.0 - q_soft) + q_soft * q_iou
-        pw_pow = float(getattr(self.hyp, "obj_pw_pow", 0.5))
-        q_pos_weight = ((q_logits.numel() - n_pos) / n_pos).clamp(1.0, 10000.0).pow(pw_pow)
-        extra[2] = F.binary_cross_entropy_with_logits(
-            q_logits, q_target_all, reduction="mean", pos_weight=q_pos_weight
-        )
+        extra = torch.zeros(3, device=self.device, dtype=torch.float32)
 
         if fg_mask.any():
             label_smoothing = float(getattr(self.hyp, "role_label_smoothing", 0.0))
@@ -417,19 +367,16 @@ class PicoCompactPoseLoss(v8PoseLoss):
                 gt_cls = batch["cls"].view(-1)[gt_sel].long()[gt_idx]
                 color_logits = preds["color"][b].permute(1, 0)[m].float()
                 number_logits = preds["number"][b].permute(1, 0)[m].float()
-                # Colour/role are properties of the plate, not of an anchor. A
-                # plate too small or too oblique to read should still train the
-                # box/pose/objectness heads, but not teach a class guess.
+                # Colour is a property of the plate, not of an anchor: a plate
+                # too small or too oblique to read still trains box/pose/role
+                # through TAL, but should not teach the colour head a guess.
                 gt_kpts = batch["keypoints"][gt_sel][gt_idx].to(self.device).float()[..., :2] * keypoint_scale
                 role_w = role_mask_weight(gt_kpts, area_ramp, ratio_ramp)
-                color_ce = F.cross_entropy(
-                    color_logits, self.color_map[gt_cls], reduction="none", label_smoothing=label_smoothing
-                )
-                number_ce = F.cross_entropy(
-                    number_logits, self.number_map[gt_cls], reduction="none", label_smoothing=label_smoothing
-                )
-                extra[0] += (color_ce * role_w).sum()
-                extra[1] += (number_ce * role_w).sum()
+                target = self.color_map[gt_cls].float()
+                if label_smoothing > 0:
+                    target = target * (1.0 - label_smoothing) + 0.5 * label_smoothing
+                color_bce = F.binary_cross_entropy_with_logits(color_logits[:, 0], target, reduction="none")
+                extra[0] += (color_bce * role_w).sum()
                 if preds_aug is not None:
                     # The clean, labelled view is the teacher; the photometric view
                     # is the student, so the exported colour/role heads learn to
@@ -443,23 +390,18 @@ class PicoCompactPoseLoss(v8PoseLoss):
                     consistency_sum += batch_sum
                     consistency_w += batch_w
                 with torch.no_grad():
-                    # do the two classification paths agree on the positive anchors?
-                    joint_cls = preds["scores"][b].permute(1, 0)[m].argmax(-1)
-                    attr_cls = color_logits.argmax(-1) * NUM_ROLE + number_logits.argmax(-1)
                     mon = self._monitors()
-                    mon["agree"] += (joint_cls == attr_cls).sum()
-                    mon["agree_n"] += m.sum()
                     mon["role_w"] += role_w.sum().double()
                     mon["role_n"] += role_w.numel()
             if preds_aug is not None:
-                extra[4] = consistency_sum / consistency_w.clamp_min(1.0)
+                extra[2] = consistency_sum / consistency_w.clamp_min(1.0)
 
             pred_px = pred_kpts * stride_tensor.view(1, -1, 1, 1)
 
             geom_gain = float(getattr(self.hyp, "geom", 0.0))
             if geom_gain > 0:
                 pts = pred_px[fg_mask][..., :2].float()
-                extra[3] = pose_geometry_loss(
+                extra[1] = pose_geometry_loss(
                     pts,
                     par=float(getattr(self.hyp, "geom_par", 0.10)),
                     opp=float(getattr(self.hyp, "geom_opp", 0.33)),
@@ -468,10 +410,8 @@ class PicoCompactPoseLoss(v8PoseLoss):
                 )
 
         extra[0] *= getattr(self.hyp, "color", 0.1) / n_pos
-        extra[1] *= getattr(self.hyp, "number", 0.1) / n_pos
-        extra[2] *= getattr(self.hyp, "quality", 0.05)
-        extra[3] *= float(getattr(self.hyp, "geom", 0.0))
-        extra[4] *= float(getattr(self.hyp, "consistency", 0.0))
+        extra[1] *= float(getattr(self.hyp, "geom", 0.0))
+        extra[2] *= float(getattr(self.hyp, "consistency", 0.0))
         extra = extra * bs
 
         return torch.cat((loss, extra)), torch.cat((loss.detach(), extra.detach()))

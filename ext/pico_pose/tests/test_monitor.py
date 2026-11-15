@@ -1,4 +1,4 @@
-"""Tests for the validation-time objectness monitor."""
+"""Tests for the validation-time anchor-confidence monitor."""
 
 from __future__ import annotations
 
@@ -30,10 +30,10 @@ def test_anchor_labels_and_gt_recall():
     assert (st.n_pos, st.n_neg, st.n_amb) == (2, 2, 0)
     assert (st.tp, st.fp) == (1, 2)  # only 0.9 is a positive above 0.5
     res = st.result()
-    assert res["obj/P@0.5"] == pytest.approx(1 / 3)
-    assert res["obj/R@0.5"] == pytest.approx(0.5)
-    assert res["obj/GT_R@0.5"] == pytest.approx(1.0)  # at least one anchor >0.5 inside
-    assert 0.0 <= res["obj/AP"] <= 1.0
+    assert res["anchor/P@0.5"] == pytest.approx(1 / 3)
+    assert res["anchor/R@0.5"] == pytest.approx(0.5)
+    assert res["anchor/GT_R@0.5"] == pytest.approx(1.0)  # at least one anchor >0.5 inside
+    assert 0.0 <= res["anchor/AP"] <= 1.0
 
 
 def test_ambiguous_anchors_are_excluded():
@@ -51,7 +51,7 @@ def test_empty_boxes_are_all_negatives():
     st = AnchorStats()
     st.add(torch.tensor([0.2, 0.9]), torch.tensor([[1.0, 1.0], [2.0, 2.0]]), torch.zeros((0, 4)))
     assert st.n_neg == 2 and st.n_pos == 0 and st.gt_total == 0
-    assert st.result()["obj/GT_R@0.5"] == 0.0
+    assert st.result()["anchor/GT_R@0.5"] == 0.0
 
 
 def test_monitor_hooks_head_and_reads_anchors():
@@ -60,7 +60,7 @@ def test_monitor_hooks_head_and_reads_anchors():
 
     from ultralytics.nn.tasks import PoseModel
 
-    from ext.pico_pose.monitor import ObjectnessMonitor
+    from ext.pico_pose.monitor import AnchorConfMonitor
 
     cfg = "ext/pico_pose/cfg/yolo11-pose-pico-compact.yaml"
     model = PoseModel(cfg, nc=14, data_kpt_shape=(4, 2), verbose=False).eval()
@@ -69,7 +69,7 @@ def test_monitor_hooks_head_and_reads_anchors():
         model=model,
         validator=SimpleNamespace(update_metrics=lambda preds, batch: None),
     )
-    mon = ObjectnessMonitor(trainer)
+    mon = AnchorConfMonitor(trainer)
     mon.attach()
     img = torch.rand(1, 3, 480, 640)
     with torch.no_grad():
@@ -84,7 +84,7 @@ def test_monitor_hooks_head_and_reads_anchors():
     mon.detach()
     assert mon.stats.n_pos > 0, "anchors inside the GT box should be positives"
     res = mon.result()
-    for k in ("obj/AP", "obj/P@0.5", "obj/R@0.5", "obj/GT_R@0.5", "val/P@0.5", "val/R@0.5"):
+    for k in ("anchor/AP", "anchor/P@0.5", "anchor/R@0.5", "anchor/GT_R@0.5", "val/P@0.5", "val/R@0.5"):
         assert k in res
 
 
@@ -113,9 +113,9 @@ def test_assignment_summary_empty():
 def test_fixed_conf_pr_matching():
     from types import SimpleNamespace
 
-    from ext.pico_pose.monitor import ObjectnessMonitor
+    from ext.pico_pose.monitor import AnchorConfMonitor
 
-    mon = ObjectnessMonitor(SimpleNamespace())
+    mon = AnchorConfMonitor(SimpleNamespace())
     gt = torch.tensor([[10.0, 10.0, 50.0, 50.0]])
     gc = torch.tensor([3])
     det = {

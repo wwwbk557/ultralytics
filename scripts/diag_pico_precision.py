@@ -1,16 +1,11 @@
-"""Diagnose the low box precision of the Pico pose head.
+"""Break down the Pico pose head's false positives on a val subset.
 
-The head exposes three different class-score paths:
-
-  A. colour(softmax) x role(softmax) x quality(sigmoid)  <- what inference uses
-  B. colour(softmax) x role(softmax)                     <- no quality gate
-  C. joint classifier sigmoid                            <- the branch TAL/cls loss trains
-  D. joint classifier x quality
-
-``criterion`` optimises C (TAL assignment + BCE), but ``_inference`` emits A.
-This script measures AP50 / precision / recall for each variant on a val subset
-and breaks the false positives down into "background" vs "duplicate/offset"
-so it is clear whether the box branch or the score path is at fault.
+The head has one score path: ``colour(1-logit sigmoid) x role(sigmoid)``, which
+is exactly what the exported 16-channel tensor yields. This script measures
+AP50 / precision / recall and splits the false positives into "background" vs
+"duplicate/offset", so it is clear whether missing objects or duplicate boxes
+dominate. An oracle-class row isolates how much the class score costs when the
+box is already correct.
 
 Usage:
     python scripts/diag_pico_precision.py --weights runs/.../best.pt --n 200
@@ -67,15 +62,13 @@ def build_loader(data_path: str, n: int, batch: int, workers: int = 4):
     return build_dataloader(ds, batch=batch, workers=workers, shuffle=False), data
 
 
-def score_variants(y: torch.Tensor, head_preds: dict) -> dict[str, torch.Tensor]:
-    """Return class-score blocks for A/B/C/D, each (B, nc, A)."""
-    scores_a = y[:, 4:18]  # already colour x role x quality
-    color = head_preds["color"].softmax(1)
-    number = head_preds["number"].softmax(1)
-    q = head_preds["quality"].sigmoid()
-    scores_b = (color[:, :, None] * number[:, None, :]).reshape(y.shape[0], -1, y.shape[2])
-    scores_c = head_preds["scores"].sigmoid()
-    return {"A colour*role*q": scores_a, "B colour*role": scores_b, "C joint": scores_c, "D joint*q": scores_c * q}
+def score_variants(head_preds: dict) -> dict[str, torch.Tensor]:
+    """Return the deployment class-score block (B, nc, A)."""
+    p_red = head_preds["color"].sigmoid()
+    color = torch.cat((1.0 - p_red, p_red), 1)
+    number = head_preds["number"].sigmoid()
+    scores = (color[:, :, None] * number[:, None, :]).reshape(color.shape[0], -1, number.shape[2])
+    return {"colour*role": scores}
 
 
 def run_nms(boxes: torch.Tensor, scores: torch.Tensor, conf: float, iou: float, nc: int):
@@ -157,8 +150,7 @@ def main():
     names = data["names"]
 
     per_variant = {k: {"tp": [], "conf": [], "cls": [], "conf_all": [], "tp_all": []} for k in
-                   ("A colour*role*q", "B colour*role", "C joint", "D joint*q")}
-    per_variant["oracle cls"] = {"tp": [], "conf": [], "cls": [], "conf_all": [], "tp_all": []}
+                   ("colour*role", "oracle cls")}
     fp_kind = {"背景(与任何GT IoU<0.5)": 0, "重复框/定位差(IoU>=0.5)": 0}
     n_gt = np.zeros(args.nc, np.int64)
     max_scores = []
@@ -170,9 +162,9 @@ def main():
                 break
             img = batch["img"].float() / 255.0
             y, head_preds = model(img)
-            variants = score_variants(y, head_preds)
+            variants = score_variants(head_preds)
             dets = {k: run_nms(y[:, :4], v, args.conf, args.iou, args.nc) for k, v in variants.items()}
-            dets["oracle cls"] = run_nms(y[:, :4], variants["A colour*role*q"], args.conf, args.iou, args.nc)
+            dets["oracle cls"] = run_nms(y[:, :4], variants["colour*role"], args.conf, args.iou, args.nc)
 
             bboxes = batch["bboxes"].numpy().reshape(-1, 4)
             bcls = batch["cls"].numpy().reshape(-1).astype(int)
@@ -188,7 +180,7 @@ def main():
                 gt[:, :4] = gx
                 gt[:, 4] = bcls[m]
                 n_gt += np.bincount(gt[:, 4].astype(int), minlength=args.nc)
-                max_scores.append(float(variants["A colour*role*q"][b].max()))
+                max_scores.append(float(variants["colour*role"][b].max()))
                 for k, d in dets.items():
                     p = d[b].numpy() if len(d[b]) else np.zeros((0, 6), np.float32)
                     if k == "oracle cls" and len(p):
@@ -201,7 +193,7 @@ def main():
                     per_variant[k]["tp"].append(tp)
                     per_variant[k]["conf"].append(p[:, 4])
                     per_variant[k]["cls"].append(p[:, 5].astype(int))
-                    if k == "A colour*role*q":
+                    if k == "colour*role":
                         n_pred_pos = (p[:, 4] >= 0.25)
                         for i in np.where(n_pred_pos)[0]:
                             if not tp[i]:
@@ -224,11 +216,11 @@ def main():
         target_cls = np.repeat(np.arange(args.nc), n_gt)
         tp_, fp_, p_, r_, f1_, ap_, *_ = ap_per_class(tp[:, None], cf, cl, target_cls)
         print(f"{k:<20}{ap_[:, 0].mean():>8.3f}{p_.mean():>8.3f}{r_.mean():>8.3f}{f1_.mean():>8.3f}")
-    print(f"\nconf>=0.25 FP breakdown (variant A): {fp_kind}")
-    print("\nper-class AP50 (variant A vs C):")
+    print(f"\nconf>=0.25 FP breakdown: {fp_kind}")
+    print("\nper-class AP50 (predicted class vs oracle class):")
     for c, name in names.items():
         line = f"  {name:<16}"
-        for k in ("A colour*role*q", "C joint"):
+        for k in ("colour*role", "oracle cls"):
             d = per_variant[k]
             # per-class AP50 over all images
             tp = np.concatenate(d["tp"]); cf = np.concatenate(d["conf"]); cl = np.concatenate(d["cls"])

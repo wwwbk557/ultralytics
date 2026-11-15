@@ -53,7 +53,6 @@ def parse():
     p.add_argument("--mode", choices=sorted(MODES), default="kpts")
     p.add_argument("--iou", type=float, default=0.45)
     p.add_argument("--conf", type=float, default=0.25, help="operating point for the error breakdown")
-    p.add_argument("--obj-thresh", type=float, default=None, help="emulate the deploy objectness gate")
     return p.parse_args()
 
 
@@ -152,9 +151,6 @@ def main():
 
     model = YOLO(args.weights).model.eval()
     model.model[-1]._inference = MethodType(MODES[args.mode], model.model[-1])
-    if args.obj_thresh is not None:
-        model.model[-1].obj_threshold = float(args.obj_thresh)
-        model.model[-1].deploy_filter = True
 
     vargs = get_cfg(
         overrides=dict(model=args.weights, data=str(args.data), imgsz=HW, conf=0.001, iou=args.iou, task="pose",
@@ -171,7 +167,7 @@ def main():
     stats, color_conf, role_conf, curve = error_breakdown(model, loader, args.conf, args.iou)
     names = data["names"]
     print(f"\nweights={Path(args.weights).parent.name} mode={args.mode} iou={args.iou} n={len(ds)} "
-          f"conf={args.conf} obj_gate={args.obj_thresh}  ({sum(stats['gt'].values())} GT)")
+          f"conf={args.conf}  ({sum(stats['gt'].values())} GT)")
     print(f"{'cls':<16}{'n_gt':>6}{'TP':>6}{'wrong':>7}{'dup':>6}{'bgFP':>6}{'FN':>6}{'P':>7}{'R':>7}"
           f"{'AP50':>7}{'AP50-95':>8}")
     for c in range(len(names)):
