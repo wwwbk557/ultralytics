@@ -1,0 +1,26 @@
+code snapshot = git commit 5e9869ae8bf1139f2c369aa362d727dd9b3dcecb
+commit date: 2026-11-15 16:33:31 +0800
+subject: feat: env decorrelation, plate-scale jitter and kpt-box sync for Scheme-C v3
+branch at snapshot: custom/pico-pose (parent bb87ecaa8)
+
+This commit contains the exact training-time state of:
+ ext/pico_pose/box_sync.py                |  72 +++++
+ ext/pico_pose/env_decouple.py            | 464 +++++++++++++++++++++++++++++++
+ ext/pico_pose/plate_scale.py             | 147 ++++++++++
+ ext/pico_pose/rect_train.py              |  90 ++++++
+ ext/pico_pose/tests/test_box_sync.py     |  66 +++++
+ ext/pico_pose/tests/test_env_decouple.py |  76 +++++
+ ext/pico_pose/tests/test_plate_scale.py  | 135 +++++++++
+ ext/pico_pose/tests/test_rect_augment.py |  51 +++-
+ scripts/build_pose23_schemeC_full.py     | 228 +++++++++++++++
+ scripts/build_pose23_ws_bysize.py        | 188 +++++++++++++
+ scripts/val_pico_env_swap.py             | 331 ++++++++++++++++++++++
+ train_schemeC.py                         |  36 ++-
+ ultralytics/cfg/default.yaml             |  12 +
+ 13 files changed, 1892 insertions(+), 4 deletions(-)
+
+Working-tree changes made AFTER the run (2026-11-14 armor-ulm work) are NOT part of this archive.
+
+archive: ultralytics_2027_5e9869ae8.tar.gz (tree prefix ultralytics_2027_5e9869ae8/)
+files: 970
+sha256: 4af75cf220daa6186c371fe3cd3a6f81aca3dc85a22d4e222a58c7c7efe417b7

@@ -1,0 +1,27 @@
+path: /home/wbk/ultralytics_2027/datasets/schemeC_pose23_full_v5
+train: images/train
+val: images/val
+kpt_shape:
+- 4
+- 2
+flip_idx:
+- 1
+- 0
+- 3
+- 2
+nc: 14
+names:
+  0: blue_sentry
+  1: blue_hero
+  2: blue_engineer
+  3: blue_3
+  4: blue_4
+  5: blue_outpost
+  6: blue_base
+  7: red_sentry
+  8: red_hero
+  9: red_engineer
+  10: red_3
+  11: red_4
+  12: red_outpost
+  13: red_base

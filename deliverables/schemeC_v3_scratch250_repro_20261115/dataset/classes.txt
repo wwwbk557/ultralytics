@@ -1,0 +1,14 @@
+blue_sentry
+blue_hero
+blue_engineer
+blue_3
+blue_4
+blue_outpost
+blue_base
+red_sentry
+red_hero
+red_engineer
+red_3
+red_4
+red_outpost
+red_base

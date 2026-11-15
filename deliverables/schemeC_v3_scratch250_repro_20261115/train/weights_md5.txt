@@ -1,0 +1,33 @@
+# 27 checkpoints pulled from /hy-tmp/ultralytics_2027/runs/pose/runs/pose/schemeC_v3_scratch250/weights
+# and md5-verified 1:1 against the server (ALL_27_MATCH, 2026-11-13).
+# ONNX exports made locally on 2026-11-13 11:56 (fp16 weights, fp32 I/O, bias +3.214 baked)
+c900340ba978f3a592dae5c2d7eaf0ef  best.pt
+ea28846410613042e633d470fbce835c  epoch0.pt
+b6f02e01f735c00bd3539091a518f8e6  epoch100.pt
+68b19a1e4c28faa69828f71e56790abd  epoch10.pt
+d33a16b449571924b32e4892b6a9d8e1  epoch110.pt
+00ce2e5a79fca36838b7276dd17c6b66  epoch120.pt
+88b439116b798e558a35c18f141ddb6b  epoch130.pt
+0231c9eafe2d7928157fac4a86080abc  epoch140.pt
+d173a5c8f0c83f5648c577b2e225ca8b  epoch150.pt
+1406a7c21f6af2bc7c995f44315d97ac  epoch160.pt
+9cc9f3b4dcd1008d8d05b8de8b6ecaed  epoch170.pt
+1451fd12ef319d5c310f4b1159f113e5  epoch180.pt
+e1eeef759a5264f25d4f2967346ab65a  epoch190.pt
+4c2f13d079f8bcadfee28133e7719a44  epoch200.pt
+758e707b57818f80fb53ba7d7102560b  epoch20.pt
+e3971906b5257f33b770d0aaa5338783  epoch210.pt
+49d5115667a5049bf5be09da89db5cd2  epoch220.pt
+45e2e1f980d9200b7d33f2c1a50d9f67  epoch230.pt
+a70095f059baa45287827159947eb0e5  epoch240.pt
+7e395089f8862aa3747db31d63bcedaa  epoch30.pt
+194e3b77f61d8c634187085a19451263  epoch40.pt
+2c44a3e0d22f4c24e4642608900d4651  epoch50.pt
+5fa50b59119ecce6682c72a13c45b554  epoch60.pt
+4df42a62978790df7dc8f644eed4b8fe  epoch70.pt
+4c23541b8b287ccc095cb89319cde449  epoch80.pt
+72de003e9096037689b371c3d01b18e1  epoch90.pt
+689fa9c564ca64315e3578ca97a198b8  last.pt
+5b092104e5d24089b357291cccc08437  1113_last.onnx
+514f2e03a4b92eb0d1c15bb0d4d9fad2  1113_best.onnx
+f1f1f731bfa5ef47f1e3af9e252df7a1  1113_200.onnx

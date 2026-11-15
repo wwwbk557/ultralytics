@@ -1,0 +1,76 @@
+{
+  "source": "/home/wbk/ultralytics_2027/datasets/pose23_current",
+  "output": "/home/wbk/ultralytics_2027/datasets/schemeC_pose23_full_v5",
+  "rule": "label-only filter: drop white/5/unknown; drop visibility=0 objects; keep mixed images; unit-level leakage-safe split",
+  "mapping": {
+    "0": 1,
+    "1": 2,
+    "2": 3,
+    "3": 4,
+    "5": 0,
+    "6": 5,
+    "14": 6,
+    "7": 8,
+    "8": 9,
+    "9": 10,
+    "10": 11,
+    "12": 7,
+    "13": 12,
+    "15": 13
+  },
+  "units": {
+    "train": 253,
+    "val": 19,
+    "overlap": 0
+  },
+  "conflicts_consolidated": [],
+  "images": {
+    "train": 13173,
+    "val": 3521
+  },
+  "objects": {
+    "train": 22557,
+    "val": 5500
+  },
+  "class_counts": {
+    "train": {
+      "blue_sentry": 1122,
+      "blue_hero": 1358,
+      "blue_engineer": 2204,
+      "blue_3": 2104,
+      "blue_4": 3083,
+      "blue_outpost": 1050,
+      "blue_base": 659,
+      "red_sentry": 750,
+      "red_hero": 1018,
+      "red_engineer": 2212,
+      "red_3": 2563,
+      "red_4": 2601,
+      "red_outpost": 1474,
+      "red_base": 359
+    },
+    "val": {
+      "blue_sentry": 225,
+      "blue_hero": 608,
+      "blue_engineer": 395,
+      "blue_3": 492,
+      "blue_4": 487,
+      "blue_outpost": 352,
+      "blue_base": 91,
+      "red_sentry": 340,
+      "red_hero": 326,
+      "red_engineer": 523,
+      "red_3": 359,
+      "red_4": 515,
+      "red_outpost": 613,
+      "red_base": 174
+    }
+  },
+  "stats": {
+    "images_train": 13173,
+    "excluded_class": 2649,
+    "skip_no_14_label": 902,
+    "images_val": 3521,
+    "missing_keypoint": 4
+  }
+}

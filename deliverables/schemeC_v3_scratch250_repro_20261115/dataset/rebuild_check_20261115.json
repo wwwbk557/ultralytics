@@ -1,0 +1,59 @@
+{
+  "source": "/home/wbk/ultralytics_2027/datasets/schemeC_pose23_full_v5",
+  "output": "/home/wbk/ultralytics_2027/datasets/schemeC_pose23_ws_bysize",
+  "rule": "non-ws -> train; ws session median long side >= 24px -> train else val; ws objects < 12px dropped; ws images left empty dropped",
+  "canvas": [
+    480,
+    640
+  ],
+  "ws_sessions": {
+    "train": 106,
+    "val": 155
+  },
+  "images": {
+    "train": 11219,
+    "val": 4925
+  },
+  "dropped": {
+    "small_ws_object": 3149,
+    "ws_image_without_object": 550
+  },
+  "objects": {
+    "train": 17097,
+    "val": 7811
+  },
+  "classes": {
+    "train": {
+      "blue_sentry": 574,
+      "blue_hero": 1507,
+      "blue_engineer": 1524,
+      "blue_3": 1428,
+      "blue_4": 2407,
+      "blue_outpost": 747,
+      "blue_base": 115,
+      "red_sentry": 658,
+      "red_hero": 1082,
+      "red_engineer": 2005,
+      "red_3": 1740,
+      "red_4": 1846,
+      "red_outpost": 1403,
+      "red_base": 61
+    },
+    "val": {
+      "blue_sentry": 529,
+      "blue_hero": 401,
+      "blue_engineer": 743,
+      "blue_3": 847,
+      "blue_4": 846,
+      "blue_outpost": 588,
+      "blue_base": 414,
+      "red_sentry": 229,
+      "red_hero": 236,
+      "red_engineer": 432,
+      "red_3": 852,
+      "red_4": 887,
+      "red_outpost": 590,
+      "red_base": 217
+    }
+  }
+}

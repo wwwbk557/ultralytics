@@ -1,0 +1,139 @@
+{
+  "package": {
+    "name": "pico_pose_deploy",
+    "date": "2026-11-14",
+    "task": "pose (4 keypoints) + colour/role attribute classification",
+    "head": "PicoPoseCompactAuxBox",
+    "run": "runs/pose/schemeC_ws123val_scratch250",
+    "weights": [
+      {
+        "file": "weights/schemeC_ws123val_scratch250_20261114_best_fp16.onnx",
+        "role": "best checkpoint (recommended for deployment)",
+        "size_bytes": 2629468,
+        "md5": "b6db5ef096c4ede416e29c577f33f37b"
+      },
+      {
+        "file": "weights/schemeC_ws123val_scratch250_20261114_last_fp16.onnx",
+        "role": "last epoch; element-wise identical to best on the golden sample",
+        "size_bytes": 2629468,
+        "md5": "a704c32502dae755fa32331c34e3f901"
+      }
+    ],
+    "runtime": {
+      "onnxruntime": ">=1.16",
+      "opset": 17,
+      "ir_version": 8,
+      "producer": "pytorch 2.8.0",
+      "weights_precision": "fp16",
+      "io_precision": "fp32",
+      "batch": "fixed 1",
+      "dynamic_axes": "none"
+    }
+  },
+  "input": {
+    "name": "images",
+    "shape": [1, 3, 480, 640],
+    "shape_order": "NCHW",
+    "dtype": "float32",
+    "color_order": "RGB",
+    "value_range": [0.0, 1.0],
+    "preprocess": {
+      "source": "OpenCV BGR uint8 image",
+      "letterbox": {
+        "target_hw": [480, 640],
+        "ratio": "r = min(480 / h, 640 / w)",
+        "resize": "cv2.resize(BGR, (round(w*r), round(h*r)), INTER_LINEAR)",
+        "pad_value_bgr": 114,
+        "align": "center",
+        "padding_left": "int(round((640 - round(w*r)) / 2 - 0.1))",
+        "padding_top": "int(round((480 - round(h*r)) / 2 - 0.1))"
+      },
+      "color_convert": "BGR -> RGB after padding, before scaling",
+      "normalize": "divide by 255.0",
+      "layout": "HWC -> CHW, add batch axis, float32"
+    }
+  },
+  "output": {
+    "name": "output0",
+    "shape": [1, 6300, 16],
+    "dtype": "float32",
+    "layout": "[batch, anchor, channel]",
+    "channels": {
+      "0:8": "raw keypoint offsets: (dx,dy) x 4 corners, order TL,TR,BR,BL",
+      "8": "colour logit z; p_red = sigmoid(z), colour_p = [1 - p_red, p_red] = [p_blue, p_red]",
+      "9:16": "role logits r[0..6]; role_p = sigmoid(r), 7 INDEPENDENT probabilities (multi-label, NOT softmax)"
+    },
+    "anchors": {
+      "count": 6300,
+      "levels": [
+        {"stride": 8, "feature_hw": [60, 80], "count": 4800, "offset": 0},
+        {"stride": 16, "feature_hw": [30, 40], "count": 1200, "offset": 4800},
+        {"stride": 32, "feature_hw": [15, 20], "count": 300, "offset": 6000}
+      ],
+      "order": "level-major, then row-major inside a level (x varies fastest)",
+      "center": "(x + 0.5, y + 0.5) in grid units, x in [0, w), y in [0, h)",
+      "decode_kpts_px": "(raw + anchor_grid) * stride"
+    },
+    "decode": {
+      "keypoints": "kpt_px[k] = (raw[2k] + ax, raw[2k+1] + ay) * stride",
+      "bbox": "xyxy = (min(kpt_x), min(kpt_y), max(kpt_x), max(kpt_y)) over the 4 decoded corners (no DFL box, no objectness)",
+      "class_scores": "score[c * 7 + r] = colour_p[c] * role_p[r], c in {0:blue, 1:red}, r in 0..6",
+      "best_class": "argmax over all 14 scores; conf = max score",
+      "score_range": [0.0, 1.0]
+    }
+  },
+  "postprocess": {
+    "conf_threshold": 0.25,
+    "iou_threshold": 0.45,
+    "max_det": 300,
+    "nms": "class-aware greedy NMS on xyxy boxes, scores sorted descending (same as ultralytics non_max_suppression with multi_label=False)",
+    "cross_class_note": "different colours of the same plate are NOT suppressed by class-aware NMS and can appear as two detections; dedupe by IoU if the consumer requires one box per plate",
+    "coordinate_unmap": "x_orig = (x_net - pad_left) / r, y_orig = (y_net - pad_top) / r",
+    "box_clip": "clip final xyxy to [0, image_w] x [0, image_h]; keypoints are left unclipped"
+  },
+  "keypoints": {
+    "count": 4,
+    "order": ["TL", "TR", "BR", "BL"],
+    "flip_idx": [1, 0, 3, 2],
+    "meaning": "four corners of the armor plate in image coordinates (x right, y down)"
+  },
+  "classes": [
+    {"id": 0, "name": "blue_sentry", "color": "blue", "color_index": 0, "role": "sentry", "role_index": 0},
+    {"id": 1, "name": "blue_hero", "color": "blue", "color_index": 0, "role": "hero", "role_index": 1},
+    {"id": 2, "name": "blue_engineer", "color": "blue", "color_index": 0, "role": "engineer", "role_index": 2},
+    {"id": 3, "name": "blue_3", "color": "blue", "color_index": 0, "role": "3", "role_index": 3},
+    {"id": 4, "name": "blue_4", "color": "blue", "color_index": 0, "role": "4", "role_index": 4},
+    {"id": 5, "name": "blue_outpost", "color": "blue", "color_index": 0, "role": "outpost", "role_index": 5},
+    {"id": 6, "name": "blue_base", "color": "blue", "color_index": 0, "role": "base", "role_index": 6},
+    {"id": 7, "name": "red_sentry", "color": "red", "color_index": 1, "role": "sentry", "role_index": 0},
+    {"id": 8, "name": "red_hero", "color": "red", "color_index": 1, "role": "hero", "role_index": 1},
+    {"id": 9, "name": "red_engineer", "color": "red", "color_index": 1, "role": "engineer", "role_index": 2},
+    {"id": 10, "name": "red_3", "color": "red", "color_index": 1, "role": "3", "role_index": 3},
+    {"id": 11, "name": "red_4", "color": "red", "color_index": 1, "role": "4", "role_index": 4},
+    {"id": 12, "name": "red_outpost", "color": "red", "color_index": 1, "role": "outpost", "role_index": 5},
+    {"id": 13, "name": "red_base", "color": "red", "color_index": 1, "role": "base", "role_index": 6}
+  ],
+  "training_provenance": {
+    "dataset": "schemeC_pose23_ws123val (11,532 train / 5,162 val)",
+    "epochs": 250,
+    "imgsz_hw": [480, 640],
+    "optimizer": "AdamW",
+    "lr0": 0.0005,
+    "scratch": true,
+    "params_m": 1.642,
+    "gflops": 3.886
+  },
+  "metrics_on_own_val": {
+    "P": 0.398,
+    "R": 0.783,
+    "mAP50": 0.547,
+    "mAP50_95": 0.541
+  },
+  "known_limitations": [
+    "The colour branch is currently unreliable: ~54.5-59.4% colour accuracy on held-out workspaces (vs 99.86% for the previous v3 model). Role classification is healthy (~92.8% on matched detections).",
+    "Role outputs are independent sigmoids; do not softmax them and do not renormalise.",
+    "There is no objectness channel. Confidence is colour_p * role_p; do not look for a separate objectness row.",
+    "Do not feed this model to the old raw18 C++ decoders (OUTPUT_ATTRIBUTE_COUNT=18, objectness at row 8, 2-colour softmax, 7-way role softmax). They are semantically incompatible.",
+    "Fixed input 480x640, fixed batch 1. Re-export if another size/batch is required."
+  ]
+}
